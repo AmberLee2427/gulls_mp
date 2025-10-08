@@ -145,7 +145,7 @@ void lightcurveGenerator(struct filekeywords* Paramfile, struct event *Event, st
 		double x2off = Event->scomp_s[0] * cos(Event->scomp_phase[0]*TO_RAD);
 		double y2off = Event->scomp_s[0] * sin(Event->scomp_phase[0]*TO_RAD) * cos(Event->scomp_inc[0]*TO_RAD);
 		xs2CoM = xsCoM + x2off * cos(Event->scomp_alpha[0]*TO_RAD) - y2off * sin(Event->scomp_alpha[0]*TO_RAD);
-	ys2Center = ysCenter + x2off * sin(Event->scomp_alpha[0]*TO_RAD) + y2off * cos(Event->scomp_alpha[0]*TO_RAD);
+		ys2Center = ysCenter + x2off * sin(Event->scomp_alpha[0]*TO_RAD) + y2off * cos(Event->scomp_alpha[0]*TO_RAD);
 
 		// Get centroid for first source (already computed above in BinaryMag2 call)
 		double cx1 = Event->vbm->astrox1;
