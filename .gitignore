@@ -56,3 +56,4 @@ build/.cmake
 
 # Smoke test outputs
 smoke_test/output/
+smoke_test/__pycache__/

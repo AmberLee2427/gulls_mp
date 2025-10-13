@@ -32,16 +32,16 @@ surveys, but also supporting ground-based observatory simulations.
 1. Clone this repository (and optionally place the
    [`VBMicrolensing`](https://github.com/valboz/VBMicrolensing)
    repository alongside it so you can copy `ESPL.tbl`).
-1. Copy `ESPL.tbl` into `gulls_mp/src/`.
+1. Copy `ESPL.tbl` into `src/`.
 1. Configure and build:
    ```bash
-   cmake -S gulls_mp -B gulls_mp/build
-   cmake --build gulls_mp/build
+   cmake -S . -B build
+   cmake --build build
    ```
    This produces `gulls_std`, `gulls_croin`, and `gullsFish` in
-   `gulls_mp/build/bin/`.
+   `bin/`.
 1. (Optional) Install the binaries anywhere you like with
-   `cmake --install gulls_mp/build --prefix <path>`.
+   `cmake --install build --prefix <path>`.
 
 ### Selecting a build type
 
