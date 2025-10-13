@@ -23,19 +23,35 @@ try:
     import matplotlib
     matplotlib.use('Agg')  # Non-interactive backend
     import matplotlib.pyplot as plt
+    from matplotlib.colors import Normalize
     PLOTTING_AVAILABLE = True
 except ImportError:
     PLOTTING_AVAILABLE = False
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BUILD_BIN_DEFAULT = REPO_ROOT / "build" / "bin"
+BUILD_BIN_DEFAULT = REPO_ROOT / "bin"
 PARAM_DIR = REPO_ROOT / "smoke_test" / "parameterfiles"
 
-CASES: Tuple[Tuple[str, str], ...] = (
-    ("gulls_std", "smoke_std.prm"),
-    ("gulls_croin", "smoke_croin.prm"),
-    ("gullsFish", "smoke_fish.prm"),
+CaseDef = Tuple[str, str, str]
+
+CASES: Tuple[CaseDef, ...] = (
+    ("std-single", "gulls_std.x", "smoke_std.prm"),
+    ("std-binary", "gulls_std.x", "smoke_std_binary.prm"),
+    ("croin-single", "gulls_croin.x", "smoke_croin.prm"),
+    ("croin-binary", "gulls_croin.x", "smoke_croin_binary.prm"),
+    ("fish-single", "gullsFish.x", "smoke_fish.prm"),
+    ("fish-binary", "gullsFish.x", "smoke_fish_binary.prm"),
 )
+
+CASE_LABELS = {label for label, _, _ in CASES}
+CASE_LOOKUP: Dict[str, CaseDef] = {
+    label: (label, exe, prm) for label, exe, prm in CASES
+}
+CASE_EXEC_MAP: Dict[str, List[CaseDef]] = {}
+for case in CASES:
+    CASE_EXEC_MAP.setdefault(case[1], []).append(case)
+
+CASE_CHOICES: Tuple[str, ...] = tuple(sorted(CASE_LABELS | set(CASE_EXEC_MAP)))
 
 
 class SmokeTestError(RuntimeError):
@@ -44,12 +60,106 @@ class SmokeTestError(RuntimeError):
 
 @dataclass
 class PreparedCase:
-    name: str
+    label: str
+    exe_name: str
     exe_path: Path
     param_path: Path
     run_name: str
     output_root: Path
     output_dir: Path
+
+
+def _discover_weather_file(params: Dict[str, str]) -> tuple[str | None, str | None]:
+    """Return the weather directory and filename referenced by the params."""
+
+    weather_dir = params.get("WEATHER_PROFILE_DIR")
+    weather_file = params.get("WEATHER_PROFILE")
+    if weather_dir and weather_file:
+        return weather_dir, weather_file
+
+    obs_dir = params.get("OBSERVATORY_DIR")
+    obs_list = params.get("OBSERVATORY_LIST")
+    if not (weather_dir and obs_dir and obs_list):
+        # We still might have enough info if the weather dir was omitted, but
+        # without the directory we cannot locate the file reliably.
+        return weather_dir, weather_file
+
+    list_path = (REPO_ROOT / obs_dir / obs_list).resolve()
+    try:
+        entries = [line.strip() for line in list_path.read_text().splitlines() if line.strip() and not line.strip().startswith("#")]
+    except OSError:
+        return weather_dir, weather_file
+
+    for entry in entries:
+        obs_path = (REPO_ROOT / obs_dir / entry).resolve()
+        try:
+            for raw in obs_path.read_text().splitlines():
+                stripped = raw.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                parts = stripped.split()
+                if len(parts) >= 2 and parts[0].upper() == "WEATHER_PROFILE":
+                    return weather_dir, parts[1]
+        except OSError:
+            continue
+
+    return weather_dir, weather_file
+
+
+def ensure_weather_profile(params: Dict[str, str]) -> None:
+    """Synthesise a quarter-day weather schedule matching NUM_SIM_DAYS."""
+
+    weather_dir, weather_file = _discover_weather_file(params)
+    num_days_raw = params.get("NUM_SIM_DAYS")
+
+    if not weather_dir or not weather_file or not num_days_raw:
+        return
+
+    try:
+        num_days = int(float(num_days_raw))
+    except ValueError:
+        return
+
+    if num_days <= 0:
+        return
+
+    weather_path = (REPO_ROOT / weather_dir / weather_file).resolve()
+    required_entries = int(round((num_days + 1) * 4))
+
+    lines: List[str] = []
+    if weather_path.is_file():
+        try:
+            lines = weather_path.read_text().splitlines()
+        except OSError:
+            lines = []
+
+    values: List[float] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        if len(parts) >= 2:
+            try:
+                values.append(float(parts[1]))
+            except ValueError:
+                continue
+
+    if not values:
+        values = [1.0]
+
+    pattern = values[:]
+    expanded: List[float] = []
+    for idx in range(required_entries):
+        expanded.append(pattern[idx % len(pattern)])
+
+    try:
+        weather_path.parent.mkdir(parents=True, exist_ok=True)
+        with weather_path.open("w", encoding="utf-8") as handle:
+            for idx, value in enumerate(expanded):
+                handle.write(f"{idx / 4:.2f} {value:.6g}\n")
+    except OSError:
+        return
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,8 +178,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cases",
         nargs="*",
-        choices=[name for name, _ in CASES],
-        help="Subset of executables to run (default: all).",
+        choices=list(CASE_CHOICES),
+        help="Subset of cases to run (accepts case labels or executable names; default: all).",
     )
     parser.add_argument(
         "--instance",
@@ -126,33 +236,36 @@ def parse_parameter_file(path: Path) -> Dict[str, str]:
     return params
 
 
-def prepare_cases(build_bin: Path, selected: Sequence[Tuple[str, str]]) -> Tuple[List[PreparedCase], List[str]]:
+def prepare_cases(build_bin: Path, selected: Sequence[CaseDef]) -> Tuple[List[PreparedCase], List[str]]:
     prepared: List[PreparedCase] = []
     failures: List[str] = []
 
-    for name, prm_filename in selected:
-        exe_path = build_bin / name
+    for label, exe_name, prm_filename in selected:
+        exe_path = build_bin / exe_name
         try:
             ensure_executable(exe_path)
         except SmokeTestError as exc:
-            failures.append(str(exc))
+            failures.append(f"{label}: {exc}")
             continue
 
         param_path = PARAM_DIR / prm_filename
         if not param_path.is_file():
-            failures.append(f"Parameter file not found: {param_path}")
+            failures.append(f"{label}: Parameter file not found: {param_path}")
             continue
 
         params = parse_parameter_file(param_path)
+        ensure_weather_profile(params)
         run_name = params.get("RUN_NAME", param_path.stem)
         output_dir_value = params.get("OUTPUT_DIR")
         if not output_dir_value:
-            failures.append(f"{name}: OUTPUT_DIR missing in {param_path}")
+            failures.append(f"{label}: OUTPUT_DIR missing in {param_path}")
             continue
 
         output_root = (REPO_ROOT / output_dir_value).resolve()
         output_dir = output_root / run_name
-        prepared.append(PreparedCase(name, exe_path, param_path, run_name, output_root, output_dir))
+        prepared.append(
+            PreparedCase(label, exe_name, exe_path, param_path, run_name, output_root, output_dir)
+        )
 
     return prepared, failures
 
@@ -219,71 +332,182 @@ def plot_lightcurves(output_dir: Path) -> None:
             if has_astrom:
                 fig, axes = plt.subplots(2, 2, figsize=(12, 10))
                 fig.suptitle(f'Smoke Test: {lc_file.stem}', fontsize=14)
-                
+
+                ax_light = axes[0, 0]
+                ax_time = axes[0, 1]
+                ax_radec = axes[1, 0]
+                ax_ne = axes[1, 1]
+
                 # Photometry plot (top-left)
-                ax = axes[0, 0]
-                # Plot measured with errorbars (bottom layer)
-                ax.errorbar(time, flux, yerr=flux_err, fmt='o', markersize=2, 
-                           alpha=0.5, color='C0', label='Measured', zorder=1)
-                # Plot true flux as connected line (middle layer)
+                ax_light.errorbar(
+                    time,
+                    flux,
+                    yerr=flux_err,
+                    fmt='o',
+                    markersize=2,
+                    alpha=0.5,
+                    color='C0',
+                    label='Measured',
+                    zorder=1,
+                )
                 if true_flux is not None:
-                    ax.plot(time, true_flux, '-', linewidth=1.5, color='red', 
-                           label='True', zorder=2, alpha=0.8)
-                # Baseline on top
-                ax.axhline(1.0, color='k', linestyle='--', linewidth=1.5, 
-                          label='Baseline', zorder=3)
-                ax.set_xlabel('Time (days)')
-                ax.set_ylabel('Relative Flux')
-                ax.set_title('Light Curve')
-                ax.legend()
-                ax.grid(True, alpha=0.3)
-                
-                # RA/Dec position plot (top-right)
-                ax = axes[0, 1]
-                # Convert to milliarcsec for better visibility
+                    ax_light.plot(
+                        time,
+                        true_flux,
+                        '-',
+                        linewidth=1.5,
+                        color='red',
+                        label='True',
+                        zorder=2,
+                        alpha=0.8,
+                    )
+                ax_light.axhline(
+                    1.0,
+                    color='k',
+                    linestyle='--',
+                    linewidth=1.5,
+                    label='Baseline',
+                    zorder=3,
+                )
+                ax_light.set_xlabel('Time (days)')
+                ax_light.set_ylabel('Relative Flux')
+                ax_light.set_title('Light Curve')
+                ax_light.legend()
+                ax_light.grid(True, alpha=0.3)
+
+                # Convert to milliarcsec offsets relative to the first true centroid sample.
+                # The lightcurve file stores absolute sky coordinates (deg); shifting keeps
+                # the origin near zero while preserving relative motion against the lens.
                 meas_ra_mas = (meas_ra_deg - true_ra_deg[0]) * 3600 * 1000
                 meas_dec_mas = (meas_dec_deg - true_dec_deg[0]) * 3600 * 1000
                 true_ra_mas = (true_ra_deg - true_ra_deg[0]) * 3600 * 1000
                 true_dec_mas = (true_dec_deg - true_dec_deg[0]) * 3600 * 1000
                 meas_ra_err_mas = meas_ra_err_deg * 3600 * 1000
                 meas_dec_err_mas = meas_dec_err_deg * 3600 * 1000
-                
-                # Plot with error bars and connecting line
-                ax.errorbar(meas_ra_mas, meas_dec_mas, 
-                           xerr=meas_ra_err_mas, yerr=meas_dec_err_mas,
-                           fmt='o-', markersize=2, alpha=0.5, color='red',
-                           linewidth=1, label='Measured', capsize=2)
-                ax.plot(true_ra_mas, true_dec_mas, 'b-', linewidth=2, 
-                       alpha=0.7, label='True')
-                ax.set_xlabel('ΔRA (mas)')
-                ax.set_ylabel('ΔDec (mas)')
-                ax.set_title('Astrometric Position (RA/Dec)')
-                ax.legend()
-                ax.grid(True, alpha=0.3)
-                ax.axis('equal')
-                
-                # Astrometry: North-East trajectory (bottom-left)
-                ax = axes[1, 0]
-                ax.plot(true_E_mas, true_N_mas, 'b-', label='True', linewidth=2, alpha=0.7)
-                ax.plot(meas_E_mas, meas_N_mas, 'r.', label='Measured', markersize=3, alpha=0.5)
-                ax.set_xlabel('East (mas)')
-                ax.set_ylabel('North (mas)')
-                ax.set_title('Astrometric Trajectory (N/E)')
-                ax.legend()
-                ax.grid(True, alpha=0.3)
-                ax.axis('equal')
-                
-                # Astrometry: Time series (bottom-right)
-                ax = axes[1, 1]
-                ax.plot(time, true_N_mas, 'b-', label='True N', linewidth=2, alpha=0.7)
-                ax.plot(time, meas_N_mas, 'r.', label='Meas N', markersize=2, alpha=0.5)
-                ax.plot(time, true_E_mas, 'g-', label='True E', linewidth=2, alpha=0.7)
-                ax.plot(time, meas_E_mas, 'm.', label='Meas E', markersize=2, alpha=0.5)
-                ax.set_xlabel('Time (days)')
-                ax.set_ylabel('Centroid Shift (mas)')
-                ax.set_title('Astrometry vs Time')
-                ax.legend(fontsize=8)
-                ax.grid(True, alpha=0.3)
+
+                norm = Normalize(vmin=np.min(time), vmax=np.max(time)) if len(time) else Normalize(0, 1)
+                cmap = plt.get_cmap('plasma')
+
+                # Astrometric position (bottom-left)
+                ax_radec.errorbar(
+                    meas_ra_mas,
+                    meas_dec_mas,
+                    xerr=meas_ra_err_mas,
+                    yerr=meas_dec_err_mas,
+                    fmt='none',
+                    ecolor='lightgray',
+                    alpha=0.4,
+                    capsize=2,
+                    zorder=0,
+                )
+                sc_ra = ax_radec.scatter(
+                    meas_ra_mas,
+                    meas_dec_mas,
+                    c=time,
+                    cmap=cmap,
+                    norm=norm,
+                    s=25,
+                    alpha=0.85,
+                    label='Measured',
+                    zorder=1,
+                )
+                ax_radec.plot(
+                    true_ra_mas,
+                    true_dec_mas,
+                    color='black',
+                    linewidth=1.2,
+                    alpha=0.6,
+                    label='True track',
+                    zorder=3,
+                )
+                ax_radec.scatter(
+                    true_ra_mas,
+                    true_dec_mas,
+                    c=time,
+                    cmap=cmap,
+                    norm=norm,
+                    s=18,
+                    marker='x',
+                    linewidths=0.8,
+                    alpha=0.85,
+                    label='True samples',
+                    zorder=4,
+                )
+                ax_radec.set_xlabel('ΔRA (mas)')
+                ax_radec.set_ylabel('ΔDec (mas)')
+                ax_radec.set_title('Astrometric Position (RA/Dec)')
+                ax_radec.legend()
+                ax_radec.grid(True, alpha=0.3)
+                ax_radec.axis('equal')
+
+                # Astrometric trajectory (bottom-right)
+                ax_ne.plot(
+                    true_E_mas,
+                    true_N_mas,
+                    color='black',
+                    linewidth=1.2,
+                    alpha=0.6,
+                    label='True track',
+                    zorder=3,
+                )
+                ax_ne.scatter(
+                    true_E_mas,
+                    true_N_mas,
+                    c=time,
+                    cmap=cmap,
+                    norm=norm,
+                    s=18,
+                    marker='x',
+                    linewidths=0.8,
+                    alpha=0.85,
+                    label='True samples',
+                    zorder=4,
+                )
+                ax_ne.errorbar(
+                    meas_E_mas,
+                    meas_N_mas,
+                    xerr=meas_E_err_mas,
+                    yerr=meas_N_err_mas,
+                    fmt='none',
+                    ecolor='lightgray',
+                    alpha=0.4,
+                    capsize=2,
+                    zorder=0,
+                )
+                ax_ne.scatter(
+                    meas_E_mas,
+                    meas_N_mas,
+                    c=time,
+                    cmap=cmap,
+                    norm=norm,
+                    s=25,
+                    alpha=0.85,
+                    label='Measured',
+                    zorder=1,
+                )
+                ax_ne.set_xlabel('East (mas)')
+                ax_ne.set_ylabel('North (mas)')
+                ax_ne.set_title('Astrometric Trajectory (N/E)')
+                ax_ne.legend()
+                ax_ne.grid(True, alpha=0.3)
+                ax_ne.axis('equal')
+
+                # Adjust layout before adding colour-bar axis
+                fig.tight_layout(rect=[0, 0.12, 1, 1])
+                cbar_ax = fig.add_axes([0.25, 0.06, 0.5, 0.025])
+                cbar = fig.colorbar(sc_ra, cax=cbar_ax, orientation='horizontal')
+                cbar.set_label('Time (days)')
+
+                # Astrometry time series (top-right)
+                ax_time.plot(time, true_N_mas, 'b-', label='True N', linewidth=2, alpha=0.7)
+                ax_time.plot(time, meas_N_mas, 'r.', label='Meas N', markersize=2, alpha=0.5)
+                ax_time.plot(time, true_E_mas, 'g-', label='True E', linewidth=2, alpha=0.7)
+                ax_time.plot(time, meas_E_mas, 'm.', label='Meas E', markersize=2, alpha=0.5)
+                ax_time.set_xlabel('Time (days)')
+                ax_time.set_ylabel('Centroid Shift (mas)')
+                ax_time.set_title('Astrometry vs Time')
+                ax_time.legend(fontsize=8)
+                ax_time.grid(True, alpha=0.3)
             else:
                 # Photometry only
                 fig, ax = plt.subplots(1, 1, figsize=(10, 6))
@@ -303,9 +527,10 @@ def plot_lightcurves(output_dir: Path) -> None:
             
             # Save plot
             plot_file = output_dir / f"{lc_file.stem}_plot.png"
-            plt.tight_layout()
-            plt.savefig(plot_file, dpi=150, bbox_inches='tight')
-            plt.close()
+            if not has_astrom:
+                fig.tight_layout()
+            fig.savefig(plot_file, dpi=150, bbox_inches='tight')
+            plt.close(fig)
             print(f"  Generated plot: {plot_file.name}")
             
         except Exception as e:
@@ -319,7 +544,24 @@ def main() -> int:
     if not build_bin.is_dir():
         raise SmokeTestError(f"Build directory not found: {build_bin}")
 
-    selected = CASES if not args.cases else tuple((name, prm) for name, prm in CASES if name in args.cases)
+    if not args.cases:
+        selected: Tuple[CaseDef, ...] = CASES
+    else:
+        ordered: List[CaseDef] = []
+        for choice in args.cases:
+            if choice in CASE_LABELS:
+                ordered.append(CASE_LOOKUP[choice])
+            else:
+                ordered.extend(CASE_EXEC_MAP.get(choice, []))
+
+        seen: set[str] = set()
+        deduped: List[CaseDef] = []
+        for case in ordered:
+            if case[0] in seen:
+                continue
+            deduped.append(case)
+            seen.add(case[0])
+        selected = tuple(deduped)
     if not selected:
         print("No cases selected", file=sys.stderr)
         return 1
@@ -361,27 +603,28 @@ def main() -> int:
         cmd = [str(case.exe_path), "-i", str(case.param_path), "-s", args.instance]
         if args.field is not None:
             cmd.extend(["-f", str(args.field)])
-
-        print(f"\n=== Running {case.name} with {case.param_path.name} ===")
+        print(f"\n=== Running {case.exe_name} ({case.label}) with {case.param_path.name} ===")
         try:
             result = run_command(cmd, env, args.exec_timeout)
         except subprocess.TimeoutExpired as exc:
             if exc.stdout:
                 print(exc.stdout)
-            print(f"{case.name} exceeded {args.exec_timeout} seconds and was terminated.")
-            failures.append(f"{case.name} timed out after {args.exec_timeout}s")
+            print(
+                f"{case.exe_name} ({case.label}) exceeded {args.exec_timeout} seconds and was terminated."
+            )
+            failures.append(f"{case.label} timed out after {args.exec_timeout}s")
             continue
 
         print(result.stdout)
         if result.returncode != 0:
-            failures.append(f"{case.name} exited with {result.returncode}")
+            failures.append(f"{case.label} exited with {result.returncode}")
             continue
 
         try:
             verify_outputs(case.output_dir)
             plot_lightcurves(case.output_dir)
         except SmokeTestError as exc:
-            failures.append(f"{case.name}: {exc}")
+            failures.append(f"{case.label}: {exc}")
 
     if failures:
         print("\nSmoke test failed:")

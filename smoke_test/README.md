@@ -34,6 +34,23 @@ smoke_test/
     └── fish/
 ```
 
+## Catalog Helper Tool
+
+Use `dat_tool.py` to inspect and adjust the whitespace-delimited catalogs under `assets/`.
+
+- Inspect column layout with optional sample values:
+  ```bash
+  python dat_tool.py show assets/lenses/smoke_lens_catalog.dat
+  ```
+- Scale or offset a numeric column (writes to a new file unless `--inplace` is provided):
+  ```bash
+  python dat_tool.py apply assets/lenses/smoke_lens_catalog.dat \
+      --column Mass --operation multiply --value 1.5 \
+      --output assets/lenses/smoke_lens_catalog_scaled.dat
+  ```
+- Use `--format` to control numeric formatting (default `"{value:.7e}"`) and `--preview`
+  to choose how many modified rows are echoed.
+
 ## Requirements
 
 - Built gulls executables in `build/bin/` (see main README for build instructions)

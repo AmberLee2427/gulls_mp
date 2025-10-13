@@ -16,6 +16,7 @@ SOURCE_LIST=smoke_binary.sources
 SOURCE_COLOURS=0
 
 LENS_DIR=smoke_test/assets/lenses/
+#LENS_LIST=smoke_heavy.lenses
 LENS_LIST=smoke.lenses
 LENS_COLOURS=0
 
