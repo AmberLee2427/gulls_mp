@@ -5,6 +5,7 @@
 #include "random.h"
 #include<time.h>
 
+#include<cmath>
 #include<fstream>
 
 #define DEBUGVAR 0
@@ -130,22 +131,29 @@ void photometry(struct filekeywords* Paramfile, struct event *Event, struct obsf
       // Astrometric errors and observed values (sky NE frame in mas)
       // This block runs after Aobs/Aerr are set for both photometry paths
       if (Paramfile->astrometry_on) {
-        const double eps = 1e-12;
-        double denom = (Event->Aerr[idx] > eps ? Event->Aerr[idx] : eps);
-        double snr = fabs(Event->Aobs[idx]) / denom;
-        // FWHM in arcsec from PSF; convert to mas
+        const double eps = 1e-18;
+        const double ln256 = log(256.0);
+        const double inv_sqrt_ln256 = 1.0 / sqrt(ln256);
+
+        double aobs_abs = fabs(Event->Aobs[idx]);
+        double aerr_abs = fabs(Event->Aerr[idx]);
+        double sigma_phot = 0.0;
+        if (aobs_abs > eps) {
+          sigma_phot = aerr_abs / aobs_abs;
+        } else if (aerr_abs > eps) {
+          sigma_phot = aerr_abs;
+        } else {
+          sigma_phot = 0.0;
+        }
+
         double fwhm_mas = World[obsidx].im.fwhm * 1000.0;
-        // Photon noise term per axis (mas)
-        double sigma_photon = (snr > 0.0 ? fwhm_mas / snr : 0.0);
-        // Total per-axis sigma
+        double sigma_photon = fwhm_mas * sigma_phot * inv_sqrt_ln256;
         double floor_mas = max(0.0, Paramfile->astrometry_error_floor_mas);
         double sigma_axis = sqrt(sigma_photon * sigma_photon + floor_mas * floor_mas);
 
-        // Store errors and observed values only if we have a true centroid
         if (Event->cNtrue[idx] != 0.0 || Event->cEtrue[idx] != 0.0) {
           Event->cNobserr[idx] = sigma_axis;
           Event->cEobserr[idx] = sigma_axis;
-          // add Gaussian noise
           Event->cNobs[idx] = Event->cNtrue[idx] + sigma_axis * gasdev(Paramfile->seed);
           Event->cEobs[idx] = Event->cEtrue[idx] + sigma_axis * gasdev(Paramfile->seed);
         } else {
@@ -170,4 +178,3 @@ void photometry(struct filekeywords* Paramfile, struct event *Event, struct obsf
     }
 
 }
-
