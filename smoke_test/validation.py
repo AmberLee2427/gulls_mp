@@ -173,4 +173,73 @@ def verify_catalog_alignment(out_files: Sequence[Path], params: Dict[str, str]) 
                         f"{out_file}:{row_number} Lens mass/dist ({lens_mass:.6g}, {lens_dist:.6g}) "
                         f"not found in lens catalogs: {lens_catalog_names}"
                     )
-__all__ = ["verify_catalog_alignment", "verify_outputs"]
+
+
+def verify_binary_source_columns(params: Dict[str, str]) -> None:
+    """Verify source catalogs contain required columns when MULTIPLE_SOURCES=1."""
+    multiple_sources = params.get("MULTIPLE_SOURCES", "0").strip()
+    
+    # Only validate if multiple sources is enabled
+    if multiple_sources not in ("1", "1.0"):
+        return
+    
+    # Required columns for binary source simulations
+    # These are accessed via datadict in buildEvent.cpp
+    required_named_cols = {"Is_Binary", "ID", "primary_ID", "combined_logP"}
+    
+    # These columns must exist by position (standard catalog columns)
+    # They're accessed via Sources->RADIUS, Sources->DIST, etc.
+    required_standard_cols = {"mul", "mub", "Mass", "Radius", "Dist"}
+    
+    directory_value = params.get("SOURCE_DIR")
+    list_value = params.get("SOURCE_LIST")
+    if not directory_value or not list_value:
+        raise SmokeTestError(
+            "MULTIPLE_SOURCES=1 requires SOURCE_DIR and SOURCE_LIST to be set"
+        )
+    
+    directory = _resolve_param_path(directory_value, "source directory")
+    catalog_paths = _load_catalog_paths(directory, list_value, "source")
+    
+    # Check each source catalog
+    for catalog_path in catalog_paths:
+        lines = catalog_path.read_text(encoding="utf-8").splitlines()
+        
+        if not lines:
+            raise SmokeTestError(
+                f"MULTIPLE_SOURCES=1 but source catalog {catalog_path} is empty"
+            )
+        
+        # Find the header line (first non-comment, non-empty line)
+        header_line = None
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                header_line = stripped
+                break
+        
+        if not header_line:
+            raise SmokeTestError(
+                f"MULTIPLE_SOURCES=1 but source catalog {catalog_path} has no header"
+            )
+        
+        header_cols = set(header_line.split())
+        
+        # Check for required named columns
+        missing_named = required_named_cols - header_cols
+        if missing_named:
+            raise SmokeTestError(
+                f"MULTIPLE_SOURCES=1 but source catalog {catalog_path.name} "
+                f"is missing required binary source columns: {', '.join(sorted(missing_named))}"
+            )
+        
+        # Check for required standard columns
+        missing_standard = required_standard_cols - header_cols
+        if missing_standard:
+            raise SmokeTestError(
+                f"MULTIPLE_SOURCES=1 but source catalog {catalog_path.name} "
+                f"is missing required standard columns: {', '.join(sorted(missing_standard))}"
+            )
+
+
+__all__ = ["verify_binary_source_columns", "verify_catalog_alignment", "verify_outputs"]

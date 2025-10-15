@@ -23,6 +23,10 @@ CASES: Tuple[CaseDef, ...] = (
     ("fish-single", "gullsFish.x", "smoke_fish.prm"),
     ("fish-binary", "gullsFish.x", "smoke_fish_binary.prm"),
     ("fish-heavy", "gullsFish.x", "smoke_fish_heavy.prm"),
+    # Houston catalog tests - different seeds to test for serendipitous success
+    ("std-houston-seed1", "gulls_std.x", "smoke_std_houston_seed1.prm"),
+    ("std-houston-seed2", "gulls_std.x", "smoke_std_houston_seed2.prm"),
+    ("std-houston-seed3", "gulls_std.x", "smoke_std_houston_seed3.prm"),
 )
 
 CASE_LABELS = {label for label, _, _ in CASES}

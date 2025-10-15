@@ -53,8 +53,15 @@ src/ESPL.tbl
 build/
 build/CMakeFiles/
 build/.cmake
+build_release/
 
 # Smoke test outputs
 smoke_test/output/
 smoke_test/__pycache__/
 smoke_test/parameterfiles/__generated__/
+
+# DS_Store files
+.DS_Store
+*/.DS_Store
+*/*.DS_Store
+*/*/*.DS_Store
