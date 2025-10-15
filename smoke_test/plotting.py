@@ -550,11 +550,11 @@ def _render_astrometric_figure(
                 "",
                 xy=(end_ra, end_dec),
                 xytext=(start_ra, start_dec),
-                arrowprops=dict(color=spec["color"], arrowstyle="-|>", linewidth=2),
+                arrowprops=dict(color=spec["color"], arrowstyle="->", linewidth=1),
                 zorder=5,
             )
             ax_radec.plot([], [], color=spec["color"], linewidth=2, label=spec["label"])
-    ax_radec.legend()
+    ax_radec.legend(ncol=2, fontsize=8)
 
     ax_ne.plot(
         true_E_mas,
@@ -631,11 +631,11 @@ def _render_astrometric_figure(
                 "",
                 xy=(end_E, end_N),
                 xytext=(start_E, start_N),
-                arrowprops=dict(color=spec["color"], arrowstyle="-|>", linewidth=2),
+                arrowprops=dict(color=spec["color"], arrowstyle="->", linewidth=1),
                 zorder=5,
             )
             ax_ne.plot([], [], color=spec["color"], linewidth=2, label=spec["label"])
-    ax_ne.legend()
+    ax_ne.legend(ncol=2, fontsize=8)
 
     fig.tight_layout(rect=[0, 0.12, 1, 1])
     cbar_ax = fig.add_axes([0.25, 0.06, 0.5, 0.025])
@@ -734,8 +734,8 @@ def plot_lightcurves(
             lens_dist = _format_metric(summary.get("lens_dist"))
             source_dist = _format_metric(summary.get("source_dist"))
             theta_e = _format_metric(summary.get("theta_e"))
-            pm_alpha = _format_metric(summary.get("pm_alpha"))
-            pm_delta = _format_metric(summary.get("pm_delta"))
+            pm_alpha = _format_metric(summary.get("pm_helio_alpha"))
+            pm_delta = _format_metric(summary.get("pm_helio_delta"))
             subtitle = (
                 f"Lens M={lens_mass} Msun, Lens D={lens_dist} pc, "
                 f"Source D={source_dist} pc, theta_E={theta_e}, "
@@ -820,17 +820,16 @@ def plot_lightcurves(
         meas_x = _optional_column("x_centroid")
         meas_y = _optional_column("y_centroid")
 
-        pm_alpha_float = None
-        pm_delta_float = None
-        if summary:
-            pm_alpha_val = summary.get("pm_alpha")
-            pm_delta_val = summary.get("pm_delta")
-            if pm_alpha_val is not None and pm_delta_val is not None:
-                pm_alpha_float = float(pm_alpha_val)
-                pm_delta_float = float(pm_delta_val)
-                if math.isnan(pm_alpha_float) or math.isnan(pm_delta_float):
-                    pm_alpha_float = None
-                    pm_delta_float = None
+        pm_ref_alpha_float = None
+        pm_ref_delta_float = None
+        pm_ref_alpha_val = summary.get("pm_ref_alpha")
+        pm_ref_delta_val = summary.get("pm_ref_delta")
+        if pm_ref_alpha_val is not None and pm_ref_delta_val is not None:
+            pm_ref_alpha_float = float(pm_ref_alpha_val)
+            pm_ref_delta_float = float(pm_ref_delta_val)
+            if math.isnan(pm_ref_alpha_float) or math.isnan(pm_ref_delta_float):
+                pm_ref_alpha_float = None
+                pm_ref_delta_float = None
 
         source_pm_icrs: Tuple[float, float] | None = None
         lens_pm_icrs: Tuple[float, float] | None = None
@@ -870,13 +869,13 @@ def plot_lightcurves(
 
         vector_specs: List[Dict[str, float | str]] = []
         if span_years:
-            if summary and pm_alpha_float is not None and pm_delta_float is not None:
+            if pm_ref_alpha_float is not None and pm_ref_delta_float is not None:
                 vector_specs.append(
                     {
-                        "label": "Relative proper motion (heliocentric)",
+                        "label": "Relative proper motion (geocentric)",
                         "color": "black",
-                        "pm_ra": pm_alpha_float,
-                        "pm_dec": pm_delta_float,
+                        "pm_ra": pm_ref_alpha_float,
+                        "pm_dec": pm_ref_delta_float,
                     }
                 )
             if source_pm_icrs:

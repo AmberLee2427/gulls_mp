@@ -12,8 +12,6 @@ SUMMARY_COLUMN_MAP = {
     "lens_dist": "Lens_Dist",
     "source_dist": "Source_Dist",
     "theta_e": "thetaE",
-    "pm_alpha": "murel_helio_alpha",
-    "pm_delta": "murel_helio_delta",
     "source_mul": "Source_mul",
     "source_mub": "Source_mub",
     "source_l": "galactic_l",
@@ -31,6 +29,10 @@ SUMMARY_COLUMN_MAP = {
     "rho": "rho",
     "event_ra": "ra_deg",
     "event_dec": "dec_deg",
+    "pm_helio_alpha": "murel_helio_alpha",
+    "pm_helio_delta": "murel_helio_delta",
+    "pm_ref_alpha": "murel_ref_alpha",
+    "pm_ref_delta": "murel_ref_delta",
 }
 
 EVENT_ID_COLUMNS = ("EventID", "SubRun", "Field")
