@@ -97,7 +97,7 @@ python smoke_test/run_smoke_test.py --exec-timeout 120
 
 - `--build-bin PATH`: Directory containing executables (default: `build/bin`)
 - `--keep-output`: Skip cleaning existing output directories before running
-- `--cases CASE [CASE ...]`: Subset of executables to test (`gulls_std`, `gulls_croin`, `gullsFish`)
+- `--cases CASE [CASE ...]`: Subset of runs to execute. Accepts either executable names (`gulls_std`, `gulls_croin`, `gullsFish`) or case labels (`std-single`, `std-binary`, `std-heavy`, `croin-single`, `croin-binary`, `croin-heavy`, `fish-single`, `fish-binary`, `fish-heavy`). Case-specific run names are appended automatically (for example, `smoke_std_std-heavy`) so the heavy scenarios do not overwrite the baseline outputs.
 - `--instance ID`: Instance identifier passed via `-s` flag (default: `0`)
 - `--field N`: Field index passed via `-f` flag (default: `0`; use `-1` for auto-select)
 - `--exec-timeout SECONDS`: Timeout per executable (default: `180`; `<=0` disables)

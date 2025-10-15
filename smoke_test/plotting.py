@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 from .constants import REPO_ROOT
+from .errors import SmokeTestError
 
 try:
     import numpy as np
-    import pandas as pd
     import matplotlib
 
     matplotlib.use("Agg")
@@ -113,29 +113,54 @@ def plot_lightcurves(
             except ValueError:
                 sim_zero_offset = 0.0
 
-    for lc_file in lc_files:
-        try:
-            planet_vals: List[float] | None = None
-            event_vals: List[float] | None = None
-            with lc_file.open(encoding="utf-8") as header_reader:
-                for raw_header in header_reader:
-                    if not raw_header.startswith("#"):
-                        break
-                    stripped = raw_header.strip()
-                    if stripped.startswith("#Planet:"):
-                        try:
-                            planet_vals = [float(x) for x in stripped.split()[1:]]
-                        except ValueError:
-                            planet_vals = None
-                    elif stripped.startswith("#Event:"):
-                        try:
-                            event_vals = [float(x) for x in stripped.split()[1:]]
-                        except ValueError:
-                            event_vals = None
+    astrometry_expected = False
+    if params:
+        val = params.get("ASTROMETRY_ON")
+        if val is not None:
+            astrometry_expected = str(val).strip().lower() not in {"0", "false", "off"}
 
-            df = pd.read_csv(lc_file, sep=r"\s+", comment="#")
-            if df.empty:
+    for lc_file in lc_files:
+        lensframe_path: Path | None = None
+        planet_vals: List[float] | None = None
+        event_vals: List[float] | None = None
+        with lc_file.open(encoding="utf-8") as header_reader:
+            for raw_header in header_reader:
+                if not raw_header.startswith("#"):
+                    break
+                stripped = raw_header.strip()
+                if stripped.startswith("#Planet:"):
+                    try:
+                        planet_vals = [float(x) for x in stripped.split()[1:]]
+                    except ValueError:
+                        planet_vals = None
+                elif stripped.startswith("#Event:"):
+                    try:
+                        event_vals = [float(x) for x in stripped.split()[1:]]
+                    except ValueError:
+                        event_vals = None
+
+            try:
+                table = np.genfromtxt(
+                    lc_file,
+                    names=True,
+                    comments="#",
+                    dtype=float,
+                )
+            except Exception as exc:  # pragma: no cover - diagnostic guard
+                raise SmokeTestError(f"Failed to read {lc_file.name}: {exc}") from exc
+
+            table = np.atleast_1d(table)
+            column_names = list(table.dtype.names or [])
+            if not column_names or table.size == 0:
                 continue
+
+            def _column(name: str) -> np.ndarray:
+                return np.atleast_1d(np.asarray(table[name], dtype=float))
+
+            def _optional_column(name: str) -> np.ndarray | None:
+                if name not in column_names:
+                    return None
+                return np.atleast_1d(np.asarray(table[name], dtype=float))
 
             summary = None
             if summaries:
@@ -193,10 +218,10 @@ def plot_lightcurves(
             if alpha_deg_float is None:
                 alpha_deg_float = 0.0
 
-            time = df["Simulation_time"].values
-            flux = df["measured_relative_flux"].values
-            flux_err = df["measured_relative_flux_error"].values
-            true_flux = df["true_relative_flux"].values if "true_relative_flux" in df.columns else None
+            time = _column("Simulation_time")
+            flux = _column("measured_relative_flux")
+            flux_err = _column("measured_relative_flux_error")
+            true_flux = _optional_column("true_relative_flux")
 
             astrom_cols = [
                 "true_N_centroid_mas",
@@ -212,23 +237,34 @@ def plot_lightcurves(
                 "measured_centroid_ra_error_deg",
                 "measured_centroid_dec_error_deg",
             ]
-            has_astrom = all(col in df.columns for col in astrom_cols)
+            missing_astrom_cols: List[str] = [col for col in astrom_cols if col not in column_names]
+            has_astrom = not missing_astrom_cols
+            if astrometry_expected and missing_astrom_cols:
+                print(
+                    f"  Debug: {lc_file.name} missing astrometry columns: "
+                    + ", ".join(missing_astrom_cols)
+                )
+
+            if astrometry_expected and not has_astrom:
+                raise SmokeTestError(
+                    f"Smoke test failed: astrometric columns missing in {lc_file.name}"
+                )
 
             if has_astrom:
-                true_N_mas = df["true_N_centroid_mas"].values
-                true_E_mas = df["true_E_centroid_mas"].values
-                meas_N_mas = df["measured_N_centroid_mas"].values
-                meas_E_mas = df["measured_E_centroid_mas"].values
-                meas_N_err_mas = df["measured_N_centroid_error_mas"].values
-                meas_E_err_mas = df["measured_E_centroid_error_mas"].values
-                true_ra_deg = df["true_centroid_ra_deg"].values
-                true_dec_deg = df["true_centroid_dec_deg"].values
-                meas_ra_deg = df["measured_centroid_ra_deg"].values
-                meas_dec_deg = df["measured_centroid_dec_deg"].values
-                meas_ra_err_deg = df["measured_centroid_ra_error_deg"].values
-                meas_dec_err_deg = df["measured_centroid_dec_error_deg"].values
-                true_x_vals = df["true_x_centroid"].values.astype(float, copy=False) if "true_x_centroid" in df.columns else None
-                true_y_vals = df["true_y_centroid"].values.astype(float, copy=False) if "true_y_centroid" in df.columns else None
+                true_N_mas = _column("true_N_centroid_mas")
+                true_E_mas = _column("true_E_centroid_mas")
+                meas_N_mas = _column("measured_N_centroid_mas")
+                meas_E_mas = _column("measured_E_centroid_mas")
+                meas_N_err_mas = _column("measured_N_centroid_error_mas")
+                meas_E_err_mas = _column("measured_E_centroid_error_mas")
+                true_ra_deg = _column("true_centroid_ra_deg")
+                true_dec_deg = _column("true_centroid_dec_deg")
+                meas_ra_deg = _column("measured_centroid_ra_deg")
+                meas_dec_deg = _column("measured_centroid_dec_deg")
+                meas_ra_err_deg = _column("measured_centroid_ra_error_deg")
+                meas_dec_err_deg = _column("measured_centroid_dec_error_deg")
+                true_x_vals = _optional_column("true_x_centroid")
+                true_y_vals = _optional_column("true_y_centroid")
                 pm_alpha_float = None
                 pm_delta_float = None
                 if summary:
@@ -354,7 +390,7 @@ def plot_lightcurves(
                             }
                         )
 
-                vbm_model: Tuple[np.ndarray, np.ndarray, str] | None = None
+                vbm_model: Dict[str, np.ndarray | str] | None = None
                 if VBM_AVAILABLE and summary:
                     if not ASTROPY_AVAILABLE:
                         if not VBM_PLOT_WARNING_EMITTED:
@@ -411,10 +447,26 @@ def plot_lightcurves(
                                         and float(tE_val) > 0
                                     ):
                                         vbm = VBM_CLASS()  # type: ignore[operator]
-                                        coord_str = SkyCoord(
+                                        skycoord = SkyCoord(
                                             ra=float(event_ra_float) * u.deg,
                                             dec=float(event_dec_float) * u.deg,
-                                        ).to_string("hmsdms")
+                                        )
+                                        coord_str = (
+                                            f"{skycoord.ra.to_string(unit=u.hour, sep=':', pad=True)} "
+                                            f"{skycoord.dec.to_string(unit=u.deg, sep=':', pad=True, alwayssign=True)}"
+                                        )
+                                        try:
+                                            vbm.SetObjectCoordinates(coord_str)
+                                        except Exception as exc:  # pragma: no cover - diagnostic aid
+                                            if not VBM_PLOT_WARNING_EMITTED:
+                                                print(
+                                                    f"  Warning: VBM SetObjectCoordinates failed for {lc_file.name}: {exc}"
+                                                )
+                                                print(
+                                                    "           (coordinates formatted as 'HH:MM:SS.s ±DD:MM:SS.s')"
+                                                )
+                                                VBM_PLOT_WARNING_EMITTED = True
+                                            raise RuntimeError("SetObjectCoordinates failed") from exc
                                         params_vbm = [
                                             math.log(float(s_val)),
                                             math.log(float(q_val)),
@@ -430,11 +482,13 @@ def plot_lightcurves(
                                             float(pi_s_val),
                                             float(event_theta_e),
                                         ]
-                                        times_vbm = df["Simulation_time"].values + sim_zero_offset
+                                        times_vbm = time + sim_zero_offset
                                         results = vbm.BinaryAstroLightCurve(params_vbm, times_vbm)
+                                        lens_dec_deg = np.array(results[3], dtype=float)
+                                        lens_ra_deg = np.array(results[4], dtype=float)
                                         y1 = np.array(results[5], dtype=float)
                                         y2 = np.array(results[6], dtype=float)
-                                        vbm_label = "VBM BinaryAstroLightCurve"
+                                        lensframe_label = "Source Trajectory BinaryAstroLightCurve"
                                         if (
                                             true_x_vals is not None
                                             and true_y_vals is not None
@@ -458,160 +512,201 @@ def plot_lightcurves(
                                                     best_err = err
                                                     best = (label, cand_x, cand_y)
                                             if best:
-                                                vbm_label = f"VBM BinaryAstroLightCurve ({best[0]}, no parallax)"
+                                                lensframe_label = f"Source trajectory BinaryAstroLightCurve ({best[0]})"
                                                 vbm_x, vbm_y = best[1], best[2]
                                             else:
                                                 vbm_x, vbm_y = y1, y2
                                         else:
                                             vbm_x, vbm_y = y1, y2
                                         if len(vbm_x) == len(times_vbm):
-                                            vbm_model = (vbm_x, vbm_y, vbm_label)
+                                            vbm_model = {
+                                                "lens_x": vbm_x,
+                                                "lens_y": vbm_y,
+                                                "lens_label": lensframe_label,
+                                                "sky_ra": lens_ra_deg,
+                                                "sky_dec": lens_dec_deg,
+                                                "sky_label": "VBM BinaryAstroLightCurve (sky)",
+                                            }
                         except Exception as err:
                             if not VBM_PLOT_WARNING_EMITTED:
                                 print(f"  Warning: VBM centroid reconstruction failed for {lc_file.name}: {err}")
                                 VBM_PLOT_WARNING_EMITTED = True
 
-                ax_radec.errorbar(
-                    meas_ra_deg,
-                    meas_dec_deg,
-                    xerr=meas_ra_err_deg,
-                    yerr=meas_dec_err_deg,
-                    fmt="none",
-                    ecolor="lightgray",
-                    alpha=0.5,
-                    capsize=2,
-                    zorder=0,
-                )
-                sc_ra = ax_radec.scatter(
-                    meas_ra_deg,
-                    meas_dec_deg,
-                    c=time,
-                    cmap=cmap,
-                    norm=norm,
-                    s=25,
-                    alpha=0.5,
-                    label="Measured",
-                    zorder=1,
-                )
-                ax_radec.plot(
-                    true_ra_deg,
-                    true_dec_deg,
-                    color="black",
-                    linewidth=1.2,
-                    alpha=0.8,
-                    label="True track",
-                    zorder=4,
-                )
-                ax_radec.scatter(
-                    true_ra_deg,
-                    true_dec_deg,
-                    c=time,
-                    cmap=cmap,
-                    norm=norm,
-                    s=18,
-                    marker="x",
-                    linewidths=0.8,
-                    alpha=1.0,
-                    label="True samples",
-                    zorder=3,
-                )
-                ax_radec.set_xlabel("RA (degrees)")
-                ax_radec.set_ylabel("Dec (degrees)")
-                ax_radec.set_title("Absolute Astrometric Position")
-                ax_radec.grid(True, alpha=0.3)
-                ax_radec.axis("equal")
+        if astrometry_expected and vbm_model is None:
+            raise SmokeTestError(
+                f"Smoke test failed: missing VBM lens-frame plot for {lc_file.name}"
+            )
 
-                if span_years and vector_specs:
-                    start_ra = true_ra_deg[0]
-                    start_dec = true_dec_deg[0]
-                    cos_dec = math.cos(math.radians(start_dec))
-                    if abs(cos_dec) < 1e-6:
-                        cos_dec = 1e-6 if cos_dec >= 0 else -1e-6
-                    for spec in vector_specs:
-                        pm_ra = spec["pm_ra"]
-                        pm_dec = spec["pm_dec"]
-                        delta_ra_deg = (pm_ra * span_years) / (3600000.0 * cos_dec)
-                        delta_dec_deg = (pm_dec * span_years) / 3600000.0
-                        end_ra = start_ra + delta_ra_deg
-                        end_dec = start_dec + delta_dec_deg
-                        ax_radec.annotate(
-                            "",
-                            xy=(end_ra, end_dec),
-                            xytext=(start_ra, start_dec),
-                            arrowprops=dict(color=spec["color"], arrowstyle="-|>", linewidth=2),
-                            zorder=5,
-                        )
-                        ax_radec.plot([], [], color=spec["color"], linewidth=2, label=spec["label"])
+        ax_radec.errorbar(
+            meas_ra_deg,
+            meas_dec_deg,
+            xerr=meas_ra_err_deg,
+            yerr=meas_dec_err_deg,
+            fmt="none",
+            ecolor="lightgray",
+            alpha=0.5,
+            capsize=2,
+            zorder=0,
+        )
+        sc_ra = ax_radec.scatter(
+            meas_ra_deg,
+            meas_dec_deg,
+            c=time,
+            cmap=cmap,
+            norm=norm,
+            s=25,
+            alpha=0.5,
+            label="Measured",
+            zorder=1,
+        )
+        ax_radec.plot(
+            true_ra_deg,
+            true_dec_deg,
+            color="black",
+            linewidth=1.2,
+            alpha=0.8,
+            label="True track",
+            zorder=4,
+        )
+        ax_radec.scatter(
+            true_ra_deg,
+            true_dec_deg,
+            c=time,
+            cmap=cmap,
+            norm=norm,
+            s=18,
+            marker="x",
+            linewidths=0.8,
+            alpha=1.0,
+            label="True samples",
+            zorder=3,
+        )
+        if vbm_model is not None:
+            vbm_ra_deg = vbm_model["sky_ra"]
+            vbm_dec_deg = vbm_model["sky_dec"]
+            ax_radec.plot(
+                vbm_ra_deg,
+                vbm_dec_deg,
+                color="tab:purple",
+                linewidth=1.2,
+                alpha=0.9,
+                label=vbm_model.get("sky_label", "VBM BinaryAstroLightCurve (sky)"),
+            )
+
+        ax_radec.set_xlabel("RA (degrees)")
+        ax_radec.set_ylabel("Dec (degrees)")
+        ax_radec.set_title("Absolute Astrometric Position")
+        ax_radec.grid(True, alpha=0.3)
+        ax_radec.axis("equal")
+
+        if span_years and vector_specs:
+            start_ra = true_ra_deg[0]
+            start_dec = true_dec_deg[0]
+            cos_dec = math.cos(math.radians(start_dec))
+            if abs(cos_dec) < 1e-6:
+                cos_dec = 1e-6 if cos_dec >= 0 else -1e-6
+            for spec in vector_specs:
+                pm_ra = spec["pm_ra"]
+                pm_dec = spec["pm_dec"]
+                delta_ra_deg = (pm_ra * span_years) / (3600000.0 * cos_dec)
+                delta_dec_deg = (pm_dec * span_years) / 3600000.0
+                end_ra = start_ra + delta_ra_deg
+                end_dec = start_dec + delta_dec_deg
+                ax_radec.annotate(
+                    "",
+                    xy=(end_ra, end_dec),
+                    xytext=(start_ra, start_dec),
+                    arrowprops=dict(color=spec["color"], arrowstyle="-|>", linewidth=2),
+                    zorder=5,
+                )
+                ax_radec.plot([], [], color=spec["color"], linewidth=2, label=spec["label"])
                 ax_radec.legend()
 
-                ax_ne.plot(
-                    true_E_mas,
-                    true_N_mas,
-                    color="black",
-                    linewidth=1.2,
-                    alpha=0.8,
-                    label="True track",
-                    zorder=4,
-                )
-                ax_ne.scatter(
-                    true_E_mas,
-                    true_N_mas,
-                    c=time,
-                    cmap=cmap,
-                    norm=norm,
-                    s=18,
-                    marker="x",
-                    linewidths=0.8,
-                    alpha=1.0,
-                    label="True samples",
-                    zorder=3,
-                )
-                ax_ne.errorbar(
-                    meas_E_mas,
-                    meas_N_mas,
-                    xerr=meas_E_err_mas,
-                    yerr=meas_N_err_mas,
-                    fmt="none",
-                    ecolor="lightgray",
-                    alpha=0.5,
-                    capsize=2,
-                    zorder=0,
-                )
-                ax_ne.scatter(
-                    meas_E_mas,
-                    meas_N_mas,
-                    c=time,
-                    cmap=cmap,
-                    norm=norm,
-                    s=25,
-                    alpha=0.5,
-                    label="Measured",
-                    zorder=1,
-                )
-                ax_ne.set_xlabel("ΔEast (mas)")
-                ax_ne.set_ylabel("ΔNorth (mas)")
-                ax_ne.set_title("Astrometric Centroid (N/E), Relative to the Lens")
-                ax_ne.grid(True, alpha=0.3)
-                ax_ne.axis("equal")
+        ax_ne.plot(
+            true_E_mas,
+            true_N_mas,
+            color="black",
+            linewidth=1.2,
+            alpha=0.8,
+            label="True track",
+            zorder=4,
+        )
+        ax_ne.scatter(
+            true_E_mas,
+            true_N_mas,
+            c=time,
+            cmap=cmap,
+            norm=norm,
+            s=18,
+            marker="x",
+            linewidths=0.8,
+            alpha=1.0,
+            label="True samples",
+            zorder=3,
+        )
+        ax_ne.errorbar(
+            meas_E_mas,
+            meas_N_mas,
+            xerr=meas_E_err_mas,
+            yerr=meas_N_err_mas,
+            fmt="none",
+            ecolor="lightgray",
+            alpha=0.5,
+            capsize=2,
+            zorder=0,
+        )
+        ax_ne.scatter(
+            meas_E_mas,
+            meas_N_mas,
+            c=time,
+            cmap=cmap,
+            norm=norm,
+            s=25,
+            alpha=0.5,
+            label="Measured",
+            zorder=1,
+        )
+        if vbm_model is not None:
+            vbm_ra_deg = vbm_model["sky_ra"]
+            vbm_dec_deg = vbm_model["sky_dec"]
+            ra0 = vbm_ra_deg[0]
+            dec0 = math.radians(vbm_dec_deg[0])
+            cos_dec0 = math.cos(dec0) if abs(math.cos(dec0)) > 1e-6 else 1e-6
+            deg_to_mas = 3600.0 * 1000.0
+            vbm_E_mas = (vbm_ra_deg - ra0) * cos_dec0 * deg_to_mas
+            vbm_N_mas = (vbm_dec_deg - vbm_dec_deg[0]) * deg_to_mas
+            ax_ne.plot(
+                vbm_E_mas,
+                vbm_N_mas,
+                color="tab:purple",
+                linewidth=1.2,
+                alpha=0.9,
+                label=vbm_model.get("sky_label", "VBM BinaryAstroLightCurve (sky)"),
+            )
+        ax_ne.set_xlabel("ΔEast (mas)")
+        ax_ne.set_ylabel("ΔNorth (mas)")
+        ax_ne.set_title("Astrometric Centroid (N/E), Relative to the Lens")
+        ax_ne.grid(True, alpha=0.3)
+        ax_ne.axis("equal")
 
-                if span_years and vector_specs:
-                    start_E = true_E_mas[0]
-                    start_N = true_N_mas[0]
-                    for spec in vector_specs:
-                        pm_ra = spec["pm_ra"]
-                        pm_dec = spec["pm_dec"]
-                        delta_E_mas = pm_ra * span_years
-                        delta_N_mas = pm_dec * span_years
-                        end_E = start_E + delta_E_mas
-                        end_N = start_N + delta_N_mas
-                        ax_ne.annotate(
-                            "",
-                            xy=(end_E, end_N),
-                            xytext=(start_E, start_N),
-                            arrowprops=dict(color=spec["color"], arrowstyle="-|>", linewidth=2),
-                            zorder=5,
-                        )
-                        ax_ne.plot([], [], color=spec["color"], linewidth=2, label=spec["label"])
+        if span_years and vector_specs:
+            start_E = true_E_mas[0]
+            start_N = true_N_mas[0]
+            for spec in vector_specs:
+                pm_ra = spec["pm_ra"]
+                pm_dec = spec["pm_dec"]
+                delta_E_mas = pm_ra * span_years
+                delta_N_mas = pm_dec * span_years
+                end_E = start_E + delta_E_mas
+                end_N = start_N + delta_N_mas
+                ax_ne.annotate(
+                    "",
+                    xy=(end_E, end_N),
+                    xytext=(start_E, start_N),
+                    arrowprops=dict(color=spec["color"], arrowstyle="-|>", linewidth=2),
+                    zorder=5,
+                )
+                ax_ne.plot([], [], color=spec["color"], linewidth=2, label=spec["label"])
                 ax_ne.legend()
 
                 fig.tight_layout(rect=[0, 0.12, 1, 1])
@@ -666,14 +761,19 @@ def plot_lightcurves(
             fig.savefig(plot_file, dpi=150, bbox_inches="tight")
             plt.close(fig)
 
-            if has_astrom and vbm_model is not None and "x_centroid" in df.columns and "y_centroid" in df.columns:
-                vbm_x, vbm_y, vbm_label = vbm_model
-                meas_x = df["x_centroid"].values.astype(float, copy=False)
-                meas_y = df["y_centroid"].values.astype(float, copy=False)
-                true_x = true_x_vals
-                true_y = true_y_vals
+        if has_astrom and vbm_model is not None:
+            vbm_x = vbm_model["lens_x"]
+            vbm_y = vbm_model["lens_y"]
+            vbm_label = vbm_model["lens_label"]
+            meas_x = _optional_column("x_centroid")
+            meas_y = _optional_column("y_centroid")
+            mask_meas: np.ndarray | None = None
+            if meas_x is not None and meas_y is not None:
                 mask_meas = np.isfinite(meas_x) & np.isfinite(meas_y)
-                fig2, ax2 = plt.subplots(figsize=(6, 6))
+            true_x = true_x_vals
+            true_y = true_y_vals
+            fig2, ax2 = plt.subplots(figsize=(6, 6))
+            if mask_meas is not None and np.any(mask_meas):
                 sc2 = ax2.scatter(
                     meas_x[mask_meas],
                     meas_y[mask_meas],
@@ -685,17 +785,40 @@ def plot_lightcurves(
                     label="Measured centroid",
                     zorder=1,
                 )
-                if true_x is not None and true_y is not None:
-                    mask_true = np.isfinite(true_x) & np.isfinite(true_y)
-                    ax2.plot(
-                        true_x[mask_true],
-                        true_y[mask_true],
-                        linestyle="--",
-                        linewidth=1.2,
-                        color="gray",
-                        label="Stored true centroid",
-                        zorder=2,
+            else:
+                sc2 = ax2.scatter(
+                    [],
+                    [],
+                    c=[],
+                    cmap=cmap,
+                    norm=norm,
+                    s=0,
+                )
+                if meas_x is None or meas_y is None:
+                    ax2.text(
+                        0.02,
+                        0.98,
+                        "Measured centroid not available",
+                        ha="left",
+                        va="top",
+                        transform=ax2.transAxes,
+                        fontsize=8,
                     )
+            if true_x is not None and true_y is not None:
+                mask_true = np.isfinite(true_x) & np.isfinite(true_y)
+                ax2.scatter(
+                    true_x[mask_true],
+                    true_y[mask_true],
+                    c=time[mask_true],
+                    cmap=cmap,
+                    norm=norm,
+                    s=20,
+                    marker="x",
+                    linewidths=0.9,
+                    alpha=0.9,
+                    label="Stored true centroid",
+                    zorder=2,
+                )
                 ax2.plot(
                     vbm_x,
                     vbm_y,
@@ -734,18 +857,25 @@ def plot_lightcurves(
                 ax2.set_ylim(y_c - half_span, y_c + half_span)
                 ax2.set_aspect("equal", adjustable="box")
                 ax2.legend(loc="upper left")
-                cbar2 = fig2.colorbar(sc2, ax=ax2, fraction=0.046, pad=0.04)
-                cbar2.set_label("Time (days)")
-                lensframe_file = output_dir / f"{lc_file.stem}_lensframe_plot.png"
-                fig2.tight_layout()
-                fig2.savefig(lensframe_file, dpi=150, bbox_inches="tight")
-                plt.close(fig2)
-                print(f"  Generated plot: {lensframe_file.name}")
+            sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+            sm.set_array([])
+            cbar2 = fig2.colorbar(sm, ax=ax2, fraction=0.046, pad=0.04)
+            cbar2.set_label("Time (days)")
+            lensframe_file = output_dir / f"{lc_file.stem}_lensframe_plot.png"
+            fig2.tight_layout()
+            fig2.savefig(lensframe_file, dpi=150, bbox_inches="tight")
+            lensframe_path = lensframe_file
+            plt.close(fig2)
+            print(f"  Generated plot: {lensframe_file.name}")
 
             print(f"  Generated plot: {plot_file.name}")
-        except Exception as exc:
-            print(f"  Warning: Could not plot {lc_file.name}: {exc}")
-            continue
-
-
+            if not plot_file.exists():
+                raise SmokeTestError(
+                    f"Smoke test failed: missing {plot_file.name} in {output_dir}"
+                )
+            if astrometry_expected:
+                if lensframe_path is None or not lensframe_path.exists():
+                    raise SmokeTestError(
+                        f"Smoke test failed: missing lens-frame plot for {lc_file.name}"
+                    )
 __all__ = ["plot_lightcurves", "PLOTTING_AVAILABLE", "VBM_AVAILABLE", "VBM_IMPORT_ERROR"]

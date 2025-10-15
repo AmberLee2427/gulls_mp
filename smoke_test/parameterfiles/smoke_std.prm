@@ -16,7 +16,6 @@ SOURCE_LIST=smoke.sources
 SOURCE_COLOURS=0
 
 LENS_DIR=smoke_test/assets/lenses/
-#LENS_LIST=smoke_heavy.lenses
 LENS_LIST=smoke.lenses
 LENS_COLOURS=0
 
@@ -57,7 +56,7 @@ VBM_RELTOL=1.0e-6
 VBM_ABSTOL=1.0e-4
 LC_TIMEOUT=10.0
 
-NUM_SIM_DAYS=100
+NUM_SIM_DAYS=200
 
 REPEAT_SEQUENCE=0
 OBS_GROUPS=(ALL)
