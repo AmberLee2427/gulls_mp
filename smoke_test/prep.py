@@ -56,27 +56,26 @@ def _discover_weather_file(params: Dict[str, str]) -> tuple[str | None, str | No
         return weather_dir, weather_file
 
     list_path = (REPO_ROOT / obs_dir / obs_list).resolve()
-    try:
-        entries = [
-            line.strip()
-            for line in list_path.read_text(encoding="utf-8").splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        ]
-    except OSError:
+    if not list_path.is_file():
         return weather_dir, weather_file
+
+    entries = [
+        line.strip()
+        for line in list_path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
 
     for entry in entries:
         obs_path = (REPO_ROOT / obs_dir / entry).resolve()
-        try:
-            for raw in obs_path.read_text(encoding="utf-8").splitlines():
-                stripped = raw.strip()
-                if not stripped or stripped.startswith("#"):
-                    continue
-                parts = stripped.split()
-                if len(parts) >= 2 and parts[0].upper() == "WEATHER_PROFILE":
-                    return weather_dir, parts[1]
-        except OSError:
+        if not obs_path.is_file():
             continue
+        for raw in obs_path.read_text(encoding="utf-8").splitlines():
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            parts = stripped.split()
+            if len(parts) >= 2 and parts[0].upper() == "WEATHER_PROFILE":
+                return weather_dir, parts[1]
 
     return weather_dir, weather_file
 
@@ -88,10 +87,7 @@ def ensure_weather_profile(params: Dict[str, str]) -> None:
     if not weather_dir or not weather_file or not num_days_raw:
         return
 
-    try:
-        num_days = int(float(num_days_raw))
-    except ValueError:
-        return
+    num_days = int(float(num_days_raw))
 
     if num_days <= 0:
         return
@@ -99,12 +95,7 @@ def ensure_weather_profile(params: Dict[str, str]) -> None:
     weather_path = (REPO_ROOT / weather_dir / weather_file).resolve()
     required_entries = int(round((num_days + 1) * 4))
 
-    lines: List[str] = []
-    if weather_path.is_file():
-        try:
-            lines = weather_path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            lines = []
+    lines: List[str] = weather_path.read_text(encoding="utf-8").splitlines() if weather_path.is_file() else []
 
     values: List[float] = []
     for line in lines:
@@ -113,10 +104,7 @@ def ensure_weather_profile(params: Dict[str, str]) -> None:
             continue
         parts = stripped.split()
         if len(parts) >= 2:
-            try:
-                values.append(float(parts[1]))
-            except ValueError:
-                continue
+            values.append(float(parts[1]))
 
     if not values:
         values = [1.0]
@@ -124,13 +112,10 @@ def ensure_weather_profile(params: Dict[str, str]) -> None:
     pattern = list(values)
     expanded = [pattern[idx % len(pattern)] for idx in range(required_entries)]
 
-    try:
-        weather_path.parent.mkdir(parents=True, exist_ok=True)
-        with weather_path.open("w", encoding="utf-8") as handle:
-            for idx, value in enumerate(expanded):
-                handle.write(f"{idx / 4:.2f} {value:.6g}\n")
-    except OSError as exc:
-        raise SmokeTestError(f"Unable to write weather profile {weather_path}: {exc}") from exc
+    weather_path.parent.mkdir(parents=True, exist_ok=True)
+    with weather_path.open("w", encoding="utf-8") as handle:
+        for idx, value in enumerate(expanded):
+            handle.write(f"{idx / 4:.2f} {value:.6g}\n")
 
 
 def _write_param_override(src: Path, dest: Path, run_name: str) -> None:
@@ -154,10 +139,11 @@ def prepare_cases(build_bin: Path, selected: Sequence[CaseDef]) -> Tuple[List[Pr
 
     for label, exe_name, prm_filename in selected:
         exe_path = build_bin / exe_name
-        try:
-            ensure_executable(exe_path)
-        except SmokeTestError as exc:
-            failures.append(f"{label}: {exc}")
+        if not exe_path.is_file():
+            failures.append(f"{label}: Missing executable: {exe_path}")
+            continue
+        if not os.access(exe_path, os.X_OK):
+            failures.append(f"{label}: Executable is not runnable: {exe_path}")
             continue
 
         param_path = PARAM_DIR / prm_filename

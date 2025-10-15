@@ -33,10 +33,7 @@ def _resolve_param_path(raw: str, role: str) -> Path:
 
 def _load_catalog_paths(directory: Path, list_file: str, role: str) -> List[Path]:
     list_path = (directory / list_file).resolve()
-    try:
-        lines = list_path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        raise SmokeTestError(f"Failed to read {role} list {list_path}: {exc}") from exc
+    lines = list_path.read_text(encoding="utf-8").splitlines()
 
     catalog_paths: List[Path] = []
     for raw in lines:
@@ -58,10 +55,7 @@ def _load_catalog_paths(directory: Path, list_file: str, role: str) -> List[Path
 
 
 def _load_mass_dist_pairs(path: Path, role: str) -> List[Tuple[float, float]]:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        raise SmokeTestError(f"Failed to read {role} catalog {path}: {exc}") from exc
+    lines = path.read_text(encoding="utf-8").splitlines()
 
     if not lines:
         raise SmokeTestError(f"{role.capitalize()} catalog {path} is empty")
@@ -70,11 +64,8 @@ def _load_mass_dist_pairs(path: Path, role: str) -> List[Tuple[float, float]]:
     if not header:
         raise SmokeTestError(f"{role.capitalize()} catalog {path} has an empty header")
 
-    try:
-        mass_idx = header.index("Mass")
-        dist_idx = header.index("Dist")
-    except ValueError as exc:
-        raise SmokeTestError(f"{role.capitalize()} catalog {path} is missing 'Mass' or 'Dist' columns") from exc
+    mass_idx = header.index("Mass")
+    dist_idx = header.index("Dist")
 
     pairs: List[Tuple[float, float]] = []
     max_idx = max(mass_idx, dist_idx)
@@ -87,13 +78,8 @@ def _load_mass_dist_pairs(path: Path, role: str) -> List[Tuple[float, float]]:
             raise SmokeTestError(
                 f"{path}:{line_number} has insufficient columns to read Mass/Dist (expected index {max_idx})"
             )
-        try:
-            mass = float(parts[mass_idx])
-            dist = float(parts[dist_idx])
-        except ValueError as exc:
-            raise SmokeTestError(
-                f"{path}:{line_number} contains non-numeric Mass/Dist values: {parts[mass_idx]}, {parts[dist_idx]}"
-            ) from exc
+        mass = float(parts[mass_idx])
+        dist = float(parts[dist_idx])
         pairs.append((mass, dist))
 
     if not pairs:
@@ -148,61 +134,43 @@ def verify_catalog_alignment(out_files: Sequence[Path], params: Dict[str, str]) 
     source_catalog_names = ", ".join(path.name for path in source_catalog_paths)
 
     for out_file in out_files:
-        try:
-            with out_file.open(encoding="utf-8") as handle:
-                try:
-                    header_line = next(handle)
-                except StopIteration as exc:
-                    raise SmokeTestError(f"Output file {out_file} is empty") from exc
+        with out_file.open(encoding="utf-8") as handle:
+            header_line = next(handle)
 
-                header = header_line.strip().split()
-                if not header:
-                    raise SmokeTestError(f"Output file {out_file} has an empty header row")
+            header = header_line.strip().split()
+            if not header:
+                raise SmokeTestError(f"Output file {out_file} has an empty header row")
 
-                try:
-                    source_mass_idx = header.index("Source_Mass")
-                    source_dist_idx = header.index("Source_Dist")
-                    lens_mass_idx = header.index("Lens_Mass")
-                    lens_dist_idx = header.index("Lens_Dist")
-                except ValueError as exc:
+            source_mass_idx = header.index("Source_Mass")
+            source_dist_idx = header.index("Source_Dist")
+            lens_mass_idx = header.index("Lens_Mass")
+            lens_dist_idx = header.index("Lens_Dist")
+
+            max_idx = max(source_mass_idx, source_dist_idx, lens_mass_idx, lens_dist_idx)
+            for row_number, raw in enumerate(handle, start=2):
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                parts = line.split()
+                if len(parts) <= max_idx:
                     raise SmokeTestError(
-                        f"Output file {out_file} is missing Source_Mass/Source_Dist or Lens_Mass/Lens_Dist columns"
-                    ) from exc
+                        f"{out_file}:{row_number} has insufficient columns to read Source/Lens Mass or Dist"
+                    )
 
-                max_idx = max(source_mass_idx, source_dist_idx, lens_mass_idx, lens_dist_idx)
-                for row_number, raw in enumerate(handle, start=2):
-                    line = raw.strip()
-                    if not line or line.startswith("#"):
-                        continue
+                src_mass = float(parts[source_mass_idx])
+                src_dist = float(parts[source_dist_idx])
+                lens_mass = float(parts[lens_mass_idx])
+                lens_dist = float(parts[lens_dist_idx])
 
-                    parts = line.split()
-                    if len(parts) <= max_idx:
-                        raise SmokeTestError(
-                            f"{out_file}:{row_number} has insufficient columns to read Source/Lens Mass or Dist"
-                        )
-
-                    try:
-                        src_mass = float(parts[source_mass_idx])
-                        src_dist = float(parts[source_dist_idx])
-                        lens_mass = float(parts[lens_mass_idx])
-                        lens_dist = float(parts[lens_dist_idx])
-                    except ValueError as exc:
-                        raise SmokeTestError(
-                            f"{out_file}:{row_number} contains non-numeric Source/Lens Mass or Dist values"
-                        ) from exc
-
-                    if not _pair_matches((src_mass, src_dist), source_pairs):
-                        raise SmokeTestError(
-                            f"{out_file}:{row_number} Source mass/dist ({src_mass:.6g}, {src_dist:.6g}) "
-                            f"not found in source catalogs: {source_catalog_names}"
-                        )
-                    if not _pair_matches((lens_mass, lens_dist), lens_pairs):
-                        raise SmokeTestError(
-                            f"{out_file}:{row_number} Lens mass/dist ({lens_mass:.6g}, {lens_dist:.6g}) "
-                            f"not found in lens catalogs: {lens_catalog_names}"
-                        )
-        except OSError as exc:
-            raise SmokeTestError(f"Failed to read output file {out_file}: {exc}") from exc
-
-
+                if not _pair_matches((src_mass, src_dist), source_pairs):
+                    raise SmokeTestError(
+                        f"{out_file}:{row_number} Source mass/dist ({src_mass:.6g}, {src_dist:.6g}) "
+                        f"not found in source catalogs: {source_catalog_names}"
+                    )
+                if not _pair_matches((lens_mass, lens_dist), lens_pairs):
+                    raise SmokeTestError(
+                        f"{out_file}:{row_number} Lens mass/dist ({lens_mass:.6g}, {lens_dist:.6g}) "
+                        f"not found in lens catalogs: {lens_catalog_names}"
+                    )
 __all__ = ["verify_catalog_alignment", "verify_outputs"]

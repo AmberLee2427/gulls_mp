@@ -19,7 +19,7 @@
 #Field	Nstack	Texp	Sum     Description
 
 #F184 set
-0	1	5.0	5.0	field 0 - F184 daily exposure
+0	1	500.0	500.0	field 0 - F184 daily exposure
 0   -1  10000.0 10000.0 other instrument
 
 # Simulation cadence is the sum of the sequence set durations

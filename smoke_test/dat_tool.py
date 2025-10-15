@@ -15,10 +15,7 @@ class DatFileError(RuntimeError):
 
 def read_dat_file(path: Path) -> Tuple[str, List[str], List[List[str]]]:
     """Return header line, column names, and rows from a .dat file."""
-    try:
-        raw_lines = path.read_text().splitlines()
-    except OSError as exc:
-        raise DatFileError(f"Failed to read {path}: {exc}") from exc
+    raw_lines = path.read_text().splitlines()
 
     # Drop leading blank lines to simplify parsing.
     while raw_lines and not raw_lines[0].strip():
@@ -51,10 +48,7 @@ def write_dat_file(path: Path, header: str, rows: Sequence[Sequence[str]]) -> No
     """Persist a .dat file with the provided header and rows."""
     lines = [header, *((" ".join(row)) for row in rows)]
     data = "\n".join(lines) + "\n"
-    try:
-        path.write_text(data)
-    except OSError as exc:
-        raise DatFileError(f"Failed to write {path}: {exc}") from exc
+    path.write_text(data)
 
 
 def resolve_column(columns: Sequence[str], index: int | None, name: str | None) -> Tuple[int, str]:
@@ -65,27 +59,22 @@ def resolve_column(columns: Sequence[str], index: int | None, name: str | None) 
         raise DatFileError("Either --index or --column must be specified")
 
     if index is not None:
-        try:
-            col_name = columns[index]
-        except IndexError as exc:
-            raise DatFileError(f"Column index {index} is out of range (0-{len(columns) - 1})") from exc
+        if index < 0 or index >= len(columns):
+            raise DatFileError(f"Column index {index} is out of range (0-{len(columns) - 1})")
+        col_name = columns[index]
         return index, col_name
 
     assert name is not None  # for type-checkers
-    try:
-        resolved_index = columns.index(name)
-    except ValueError as exc:
+    if name not in columns:
         suggestions = ", ".join(columns)
-        raise DatFileError(f"Column '{name}' not found. Available columns: {suggestions}") from exc
+        raise DatFileError(f"Column '{name}' not found. Available columns: {suggestions}")
+    resolved_index = columns.index(name)
     return resolved_index, name
 
 
 def format_value(template: str, value: float, original: str) -> str:
     """Apply formatting template to a numeric value."""
-    try:
-        return template.format(value=value, original=original)
-    except Exception as exc:  # noqa: BLE001 - propagate formatting issues with context
-        raise DatFileError(f"Failed to format value {value} with template '{template}': {exc}") from exc
+    return template.format(value=value, original=original)
 
 
 def perform_operation(existing: float, op: str, operand: float) -> float:
@@ -152,13 +141,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
 
     for row_number, current_row in enumerate(rows):
         current_value_str = current_row[col_index]
-        try:
-            current_value = float(current_value_str)
-        except ValueError as exc:
-            raise DatFileError(
-                f"Row {row_number} column '{col_name}' value '{current_value_str}' "
-                "is not numeric and cannot be modified"
-            ) from exc
+        current_value = float(current_value_str)
 
         new_value_number = perform_operation(current_value, args.operation, args.value)
         new_value_str = format_value(args.format, new_value_number, current_value_str)
@@ -280,11 +263,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Iterable[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
-    try:
-        return args.func(args)
-    except DatFileError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
+    return args.func(args)
 
 
 if __name__ == "__main__":

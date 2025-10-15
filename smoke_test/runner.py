@@ -141,27 +141,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             cmd.extend(["-f", str(args.field)])
 
         print(f"\n=== Running {case.exe_name} ({case.label}) with {case.param_path.name} ===")
-        try:
-            result = run_command(cmd, env, args.exec_timeout, cwd=REPO_ROOT)
-        except subprocess.TimeoutExpired as exc:
-            if exc.stdout:
-                print(exc.stdout)
-            print(f"{case.exe_name} ({case.label}) exceeded {args.exec_timeout} seconds and was terminated.")
-            failures.append(f"{case.label} timed out after {args.exec_timeout}s")
-            continue
+        result = run_command(cmd, env, args.exec_timeout, cwd=REPO_ROOT)
 
         print(result.stdout)
         if result.returncode != 0:
             failures.append(f"{case.label} exited with {result.returncode}")
             continue
 
-        try:
-            out_files = verify_outputs(case.output_dir)
-            verify_catalog_alignment(out_files, case.params)
-            summaries = gather_case_metrics(out_files)
-            plot_lightcurves(case.output_dir, summaries, case.params)
-        except SmokeTestError as exc:
-            failures.append(f"{case.label}: {exc}")
+        out_files = verify_outputs(case.output_dir)
+        verify_catalog_alignment(out_files, case.params)
+        summaries = gather_case_metrics(out_files)
+        plot_lightcurves(case.output_dir, summaries, case.params)
 
     if failures:
         print("\nSmoke test failed:")

@@ -296,7 +296,7 @@ void outputLightcurve(struct event *Event, struct obsfilekeywords World[], struc
       "Simulation_time", "measured_relative_flux", "measured_relative_flux_error",
       "true_relative_flux",  "true_relative_flux_error",    "observatory_code",
       "saturation_flag",     "best_single_lens_fit",
-      "true_x_centroid", "true_x_centroid_error","true_y_centroid", "true_y_centroid_error",
+      "true_x_centroid", "true_y_centroid",
       "true_N_centroid_mas", "true_E_centroid_mas",
       "measured_N_centroid_mas",  "measured_E_centroid_mas",
       "measured_N_centroid_error_mas", "measured_E_centroid_error_mas",
@@ -408,7 +408,7 @@ void outputLightcurve(struct event *Event, struct obsfilekeywords World[], struc
 	  
         fprintf(lcfile_ptr,
     "%.12g %.8g %g %.12g %g %d %d "
-    "%.8g %.8g %.8g %.8g %.8g "
+    "%.8g %.8g %.8g "
     "%.8g %.8g %.8g %.8g %.8g %.8g "
     "%.12f %.12f %.12f %.12f %.12f %.12f "
     "%.6g %.6g %16.7f "
@@ -417,7 +417,7 @@ void outputLightcurve(struct event *Event, struct obsfilekeywords World[], struc
   Event->epoch[i], Event->Aobs[i], Event->Aerr[i],
   Event->Atrue[i], Event->Atrueerr[i], obsidx,
   (Event->nosat[i]?0:1), Event->Afit[i],
-  Event->xctrue[i], Event->xctrueerr[i], Event->yctrue[i], Event->yctrueerr[i],
+  Event->xctrue[i], Event->yctrue[i],
   Event->cNtrue[i], Event->cEtrue[i],
   Event->cNobs[i], Event->cEobs[i],
   Event->cNobserr[i], Event->cEobserr[i],
