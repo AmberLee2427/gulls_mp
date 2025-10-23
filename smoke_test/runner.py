@@ -23,7 +23,18 @@ from .execution import run_command
 from .metrics import gather_case_metrics
 from .plotting import plot_lightcurves
 from .prep import PreparedCase, prepare_cases
-from .validation import verify_binary_source_columns, verify_catalog_alignment, verify_outputs
+from .validation import (
+    verify_binary_source_columns,
+    verify_catalog_alignment,
+    verify_catalog_columns,
+    verify_input_files_exist,
+    verify_nfilters_matches_catalogs,
+    verify_outputs,
+    verify_rates_file,
+    verify_sequence_has_observations,
+    verify_source_lens_compatibility,
+    verify_weather_coverage,
+)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -62,11 +73,26 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=180.0,
         help="Seconds to wait for each executable before aborting (<=0 disables).",
     )
+    parser.add_argument(
+        "--ci",
+        action="store_true",
+        help="Run CI-optimized subset of tests (faster, essential cases only).",
+    )
     return parser.parse_args(argv)
 
 
-def _resolve_case_selection(raw_choices: Sequence[str] | None) -> Tuple[Tuple[str, str, str], ...]:
+def _resolve_case_selection(raw_choices: Sequence[str] | None, ci_mode: bool = False) -> Tuple[Tuple[str, str, str], ...]:
     if not raw_choices:
+        if ci_mode:
+            # CI subset: essential tests only (std, binary source validation)
+            return (
+                ("smoke_std", "gulls_std.x", "smoke_std.prm"),
+                ("smoke_std_binary", "gulls_std.x", "smoke_std_binary.prm"),
+                ("smoke_fish", "gullsFish.x", "smoke_fish.prm"),
+                ("smoke_fish_binary", "gullsFish.x", "smoke_std_binary.prm"),
+                ("smoke_croin", "gulls_croin.x", "smoke_croin.prm"),
+                ("smoke_croin_binary", "gulls_croin.x", "smoke_croin_binary.prm"),
+            )
         return CASES
 
     ordered: List[Tuple[str, str, str]] = []
@@ -104,7 +130,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not build_bin.is_dir():
         raise SmokeTestError(f"Build directory not found: {build_bin}")
 
-    selected = _resolve_case_selection(args.cases)
+    selected = _resolve_case_selection(args.cases, args.ci)
     if not selected:
         print("No cases selected", file=sys.stderr)
         return 1
@@ -122,12 +148,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not prepared_cases:
         return 1
     
-    # Validate binary source catalog columns for cases with MULTIPLE_SOURCES=1
+    # Validate catalogs: columns, compatibility, and binary-specific requirements
     for case in prepared_cases:
         try:
+            verify_input_files_exist(case.params)
+            verify_catalog_columns(case.params)
+            verify_source_lens_compatibility(case.params)
             verify_binary_source_columns(case.params)
+            verify_nfilters_matches_catalogs(case.params)
+            verify_weather_coverage(case.params)
+            verify_rates_file(case.params)
+            verify_sequence_has_observations(case.params)
         except SmokeTestError as err:
-            print(f"Binary source validation failed for {case.label}:")
+            print(f"Validation failed for {case.label}:")
             print(f" - {err}")
             return 1
 
