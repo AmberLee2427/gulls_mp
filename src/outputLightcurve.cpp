@@ -295,7 +295,7 @@ void outputLightcurve(struct event *Event, struct obsfilekeywords World[], struc
   {
     static const char* baseCols[] = {
       "Simulation_time", "measured_relative_flux", "measured_relative_flux_error",
-      "true_relative_flux",  "true_relative_flux_error",    "observatory_code",
+      "true_relative_flux",  "true_relative_flux_error", "source1_relative_flux", "source2_relative_flux", "observatory_code",
       "saturation_flag",     "best_single_lens_fit",
       "x_centroid", "x_centroid_error","y_centroid", "y_centroid_error",
       "true_x_centroid", "true_x_centroid_error","true_y_centroid", "true_y_centroid_error",
@@ -345,7 +345,7 @@ void outputLightcurve(struct event *Event, struct obsfilekeywords World[], struc
       }
     }
     // finish the header line
-    fprintf(lcfile_ptr, "\n");
+      fprintf(lcfile_ptr, "\n");
   }
   //output the lightcurve
   int shiftedidx;
@@ -358,12 +358,34 @@ void outputLightcurve(struct event *Event, struct obsfilekeywords World[], struc
 	  obsidx=Event->obsidx[i];
 	  shiftedidx = i-Event->nepochsvec[obsidx];
 	  
-	  fprintf(lcfile_ptr, "%.12g %.8g %g %.12g %g %d %d %.8g %.8g %.8g %.8g %.8g %.8g %.8g %.8g %.8g %.6g %.6g %16.7f %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g ",
-		  Event->epoch[i], Event->Aobs[i], Event->Aerr[i], //0, 1, 2
-		  Event->Atrue[i], Event->Atrueerr[i], obsidx, //3, 4, 5
-		  (Event->nosat[i]?0:1), Event->Afit[i], //6, 7
-		  Event->xc[i], Event->xcerr[i], Event->yc[i], Event->ycerr[i],
-		  Event->xctrue[i], Event->xctrueerr[i], Event->yctrue[i], Event->yctrueerr[i],
+    // compute per-source relative fluxes (fractions of baseline)
+    double src1_rel = 0.0, src2_rel = 0.0;
+    int sc_local = -1;
+    if(Event->scompanions.size()>0) sc_local = Event->scompanions[0];
+    if(Paramfile->multiple_sources && sc_local>-1)
+      {
+        // flux ratio FS2/FS1 for this filter
+        int filt = World[obsidx].filter;
+        double r = 0.0;
+        if(Event->scomp_fsofs1.size()>0 && Event->scomp_fsofs1[0].size()>filt)
+    r = Event->scomp_fsofs1[0][filt];
+        double FS = Event->fs[obsidx]; // combined source flux fraction of baseline
+        double FS1 = FS / (1.0 + r);
+        double FS2 = FS * r / (1.0 + r);
+        // compute magnifications for each source position using VBM
+        double a = Event->params[SS];
+        double q = Event->params[QQ];
+        double amp1 = Event->vbm->BinaryMag2(a, q, Event->xs[i], Event->ys[i], Event->rs);
+        double amp2 = Event->vbm->BinaryMag2(a, q, Event->xs2[i], Event->ys2[i], Event->scomp_rs.size()>0?Event->scomp_rs[0]:Event->rs);
+        src1_rel = FS1 * amp1;
+        src2_rel = FS2 * amp2;
+      }
+	
+    fprintf(lcfile_ptr, "%.12g %.8g %g %.12g %g %.8g %.8g %d %d %.8g %.8g %.8g %.8g %.8g %.8g %.8g %.8g %.6g %.6g %16.7f %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g ",
+      Event->epoch[i], Event->Aobs[i], Event->Aerr[i], //0, 1, 2
+      Event->Atrue[i], Event->Atrueerr[i], src1_rel, src2_rel, obsidx, //3, 4, 5, 6
+      (Event->nosat[i]?0:1), Event->Afit[i], //7, 8
+      Event->xc[i], Event->xcerr[i], Event->yc[i], Event->ycerr[i],
 		  //Event->pllx[obsidx].tshift(Event->jdepoch[i]), //8
 		  //Event->pllx[obsidx].ushift(Event->jdepoch[i]), //9
 		  //Event->pllx[obsidx].epochs[Event->jdepoch[i]],  //10
