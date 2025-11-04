@@ -65,3 +65,12 @@ smoke_test/parameterfiles/__generated__/
 */.DS_Store
 */*.DS_Store
 */*/*.DS_Store
+
+# Python cache
+__pycache__/
+*__pycache__/
+
+# Smoke Tests
+smoke_test/output/
+
+.cache
