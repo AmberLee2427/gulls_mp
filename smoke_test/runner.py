@@ -79,6 +79,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Run CI-optimized subset of tests (faster, essential cases only).",
     )
+    parser.add_argument(
+        "--validate-bagle",
+        action="store_true",
+        help="Run BAGLE physics validation on generated outputs (requires BAGLE installed).",
+    )
     return parser.parse_args(argv)
 
 
@@ -90,7 +95,9 @@ def _resolve_case_selection(raw_choices: Sequence[str] | None, ci_mode: bool = F
                 ("smoke_std", "gulls_std.x", "smoke_std.prm"),
                 ("smoke_std_binary", "gulls_std.x", "smoke_std_binary.prm"),
                 ("smoke_fish", "gullsFish.x", "smoke_fish.prm"),
-                ("smoke_fish_binary", "gullsFish.x", "smoke_std_binary.prm"),
+                # For the fish binary CI case we should use the fish binary
+                # parameter file so outputs land under the fish/ output tree.
+                ("smoke_fish_binary", "gullsFish.x", "smoke_fish_binary.prm"),
                 ("smoke_croin", "gulls_croin.x", "smoke_croin.prm"),
                 ("smoke_croin_binary", "gulls_croin.x", "smoke_croin_binary.prm"),
             )
@@ -234,6 +241,43 @@ def main(argv: Sequence[str] | None = None) -> int:
         verify_catalog_alignment(out_files, case.params)
         summaries = gather_case_metrics(out_files)
         plot_lightcurves(case.output_dir, summaries, case.params)
+        
+        # BAGLE physics validation (optional)
+        if args.validate_bagle:
+            # Run-or-die: if BAGLE (and our validator) cannot be imported, this will raise.
+            from .bagle_validator import validate_event
+
+            print(f"\n  Running BAGLE physics validation...")
+
+            # Get simulation zero time and source multiplicity from parameter dictionary
+            if 'SIMULATION_ZERO_TIME' not in case.params:
+                print(f"  Warning: SIMULATION_ZERO_TIME not found in parameter file")
+                print(f"  Skipping BAGLE validation for {case.label}")
+                continue
+
+            simulation_zero_time = float(case.params['SIMULATION_ZERO_TIME'])
+            multiple_sources = int(case.params.get('MULTIPLE_SOURCES', 0))
+
+            print(f"  Simulation zero time (BJD): {simulation_zero_time}")
+            print(f"  Multiple sources: {multiple_sources} ({'BSBL' if multiple_sources else 'PSBL'})")
+
+            validation_count = 0
+            for out_file in case.output_dir.glob("*.out"):
+                # Find matching .lc files
+                base_name = out_file.stem  # e.g., "smoke_std_0_0"
+                # Pattern matches smoke_std_0_0_0.all.lc, smoke_std_0_0_1.all.lc, etc.
+                for lc_file in case.output_dir.glob(f"{base_name}_*.all.lc"):
+                    result = validate_event(
+                        out_file, lc_file, simulation_zero_time,
+                        multiple_sources, params_dict=case.params, verbose=True
+                    )
+                    if result:
+                        validation_count += 1
+
+            if validation_count == 0:
+                print("  No events validated")
+            else:
+                print(f"  Validated {validation_count} binary lens events against BAGLE")
 
     if failures:
         print("\nSmoke test failed:")

@@ -38,7 +38,16 @@ VERBOSITY=4
 
 SET_RANDOM_SEED_TO_CLOCK=0
 RANDOM_SEED=12345
-SIMULATION_ZERO_TIME=2458849.0
+# Roman (-211) Horizons earliest ephemeris time per astroquery error message:
+#   "No ephemeris for target 'Roman Space Telescope (spacecraft)' prior to A.D. 2026-OCT-30 07:05:25.0645 TD"
+# Converted with astropy (scale=TDB):
+#   JD(TDB) = 2461343.795428987, MJD(TDB) = 61343.295428987
+# BAGLE parallax uses TDB internally (bagle/parallax.py: Time(mjd + 2400000.5, scale='tdb')).
+# Set SIMULATION_ZERO_TIME (BJD_TDB) to a value safely AFTER this cutoff to allow strict Roman (-211) queries.
+# Using +2.0 day margin to accommodate upstream BAGLE Horizons range padding (which may extend start times earlier).
+# Previous value 2461345.0 (boundary+~1.2d) still triggered pre-boundary RANGE queries due to BAGLE's internal
+# date truncation/padding. Advancing one additional day eliminates that risk without altering event physics.
+SIMULATION_ZERO_TIME=2461346.0
 
 SUBRUNSIZE=1
 

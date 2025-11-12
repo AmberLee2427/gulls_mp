@@ -18,6 +18,7 @@ from astropy.coordinates import SkyCoord
 import astropy.units as u
 
 from .constants import REPO_ROOT
+from .lightcurve_io import read_gulls_lightcurve
 from .errors import SmokeTestError
 
 candidate = (REPO_ROOT.parent / "VBMicrolensing").resolve()
@@ -58,19 +59,7 @@ def _galactic_pm_to_icrs(l_deg: float, b_deg: float, mu_l: float, mu_b: float) -
     )
 
 
-def _parse_header(lc_file: Path) -> Tuple[List[float] | None, List[float] | None]:
-    planet_vals: List[float] | None = None
-    event_vals: List[float] | None = None
-    with lc_file.open(encoding="utf-8") as header_reader:
-        for raw in header_reader:
-            if not raw.startswith("#"):
-                break
-            stripped = raw.strip()
-            if stripped.startswith("#Planet:"):
-                planet_vals = [float(x) for x in stripped.split()[1:]]
-            elif stripped.startswith("#Event:"):
-                event_vals = [float(x) for x in stripped.split()[1:]]
-    return planet_vals, event_vals
+## Header parsing moved to shared helper read_gulls_lightcurve
 
 
 def _plot_photometry_only(
@@ -696,10 +685,11 @@ def plot_lightcurves(
             astrometry_expected = str(val).strip().lower() not in {"0", "false", "off"}
 
     for lc_file in lc_files:
-        planet_vals, event_vals = _parse_header(lc_file)
-        df = pd.read_csv(lc_file, sep=r"\s+", comment="#")
+        df, meta = read_gulls_lightcurve(lc_file)
         if df.empty:
             continue
+        planet_vals = meta.get('planet_vals')
+        event_vals = meta.get('event_vals')
 
         column_names = list(df.columns)
 

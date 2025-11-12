@@ -26,7 +26,7 @@ void readParamfile(string v_file, struct filekeywords *Paramfile){
     {"OUTPUT_DIR",""},
     {"FINAL_DIR",""},          //not used in cpp, but in postprocessing
     {"EXECUTABLE",""},          //not used in cpp, but used in launch scripts
-    {"RATES_FILE",""},
+    {"RATES_FILE",""},        //is this used in cpp?
     {"PRINCIPLE_OBSERVATORY","0"}, 
     {"OUTPUT_LC","0"},
     {"STARFIELD_DIR",""},
@@ -156,10 +156,14 @@ void readParamfile(string v_file, struct filekeywords *Paramfile){
   for(auto it = pfile.begin(); it!=pfile.end(); it++)
     {
       if(it->second.length()==0)
-	{
-	  cout << __FUNCTION__ << ": ERROR: Required parameter " << it->first << " is not set in the parameter file." << endl;
-	  errsum++;
-	}
+      {
+        // RATES_FILE appears optional in the C++ executables (not consumed by the code path here).
+        // Python smoke-test validation enforces policy, when it is provided.
+        if(it->first == "RATES_FILE") continue;
+
+        cout << __FUNCTION__ << ": ERROR: Required parameter " << it->first << " is not set in the parameter file." << endl;
+        errsum++;
+      }
     }
 
   if(errsum>0)

@@ -482,6 +482,31 @@ def verify_rates_file(params: Dict[str, str]) -> None:
     if not lines:
         raise SmokeTestError(f"Rates file {rates_file.name} is empty")
     
+    # Precompute simulation window for t0 validation.
+    # If a RATES_FILE is provided, the simulation window must be defined and numeric.
+    sim_zero_str = params.get("SIMULATION_ZERO_TIME")
+    sim_days_str = params.get("NUM_SIM_DAYS")
+    if not sim_zero_str or not sim_days_str:
+        raise SmokeTestError(
+            "RATES_FILE is set, but SIMULATION_ZERO_TIME and NUM_SIM_DAYS are not both provided in the parameter file.\n"
+            "  Provide SIMULATION_ZERO_TIME (BJD_TDB) and NUM_SIM_DAYS to define the simulation window for rate t0 validation."
+        )
+
+    try:
+        sim_zero = float(sim_zero_str)
+        sim_days = float(sim_days_str)
+    except ValueError:
+        raise SmokeTestError(
+            f"SIMULATION_ZERO_TIME ({sim_zero_str}) and NUM_SIM_DAYS ({sim_days_str}) must be numeric values when using RATES_FILE."
+        )
+
+    if sim_days <= 0:
+        raise SmokeTestError(
+            f"NUM_SIM_DAYS must be positive when using RATES_FILE, got {sim_days}."
+        )
+
+    sim_window = (sim_zero, sim_zero + sim_days)
+
     # Parse rates data (format: field u0min u0max t0min t0max tEmin tEmax rate)
     for line_num, line in enumerate(lines, 1):
         line = line.strip()
@@ -531,6 +556,15 @@ def verify_rates_file(params: Dict[str, str]) -> None:
         if tEmin <= 0:
             raise SmokeTestError(
                 f"Rates file {rates_file.name} line {line_num}: tEmin ({tEmin}) must be positive"
+            )
+
+        # Simulation window validation: require t0min/t0max entirely within [SIMULATION_ZERO_TIME, SIMULATION_ZERO_TIME + NUM_SIM_DAYS]
+        win_lo, win_hi = sim_window
+        if not (win_lo <= t0min <= win_hi) or not (win_lo <= t0max <= win_hi):
+            raise SmokeTestError(
+                f"Rates file {rates_file.name} line {line_num}: t0 range [{t0min}, {t0max}] is outside simulation window "
+                f"[{win_lo}, {win_hi}] derived from SIMULATION_ZERO_TIME and NUM_SIM_DAYS.\n"
+                f"  Update RATES_FILE or adjust SIMULATION_ZERO_TIME/NUM_SIM_DAYS."
             )
 
 
