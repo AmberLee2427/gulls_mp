@@ -67,7 +67,7 @@ void lightcurveGenerator(struct filekeywords* Paramfile, struct event *Event, st
 	if (parallax_on) 
 	{
 		double phi_pi = atan2(Event->piEE, Event->piEN); // atan2(East, North)
-		PosAng = phi_pi - alpha + dPosAng;
+		PosAng = phi_pi + alpha + dPosAng;
 		astrom_ok = true;
 	} else {
 		coords c;
@@ -75,10 +75,10 @@ void lightcurveGenerator(struct filekeywords* Paramfile, struct event *Event, st
 		c.mulb2ad(Event->l, Event->b, Event->murel_l, Event->murel_b, &mua, &mud);
 		double mu_norm = hypot(mua, mud);
 
-		if (mu_norm > 1e-16) {
-			double phi_mu = atan2(mua, mud); // atan2(East, North)
-			PosAng = phi_mu - alpha + dPosAng;
-			astrom_ok = true;
+			if (mu_norm > 1e-16) {
+				double phi_mu = atan2(mua, mud); // atan2(East, North)
+				PosAng = phi_mu + alpha + dPosAng;
+				astrom_ok = true;
 		} else {
 			// Unknown sky orientation (no πE and no μ_rel direction); keep lens axes aligned to NE as a neutral fallback.
 			if (Paramfile->verbosity >= 2) {
@@ -192,9 +192,9 @@ void lightcurveGenerator(struct filekeywords* Paramfile, struct event *Event, st
 				double cx_mas = cx * Event->thE;
 				double cy_mas = cy * Event->thE;
 					
-				if (Paramfile->astrometry_on && astrom_ok) {
-					double cN = cx_mas * cosPos + cy_mas * sinPos;   // North (mas)
-					double cE = -cx_mas * sinPos + cy_mas * cosPos;  // East (mas)
+					if (Paramfile->astrometry_on && astrom_ok) {
+						double cN = cx_mas * cosPos - cy_mas * sinPos;   // North (mas)
+						double cE = cx_mas * sinPos + cy_mas * cosPos;    // East (mas)
 					Event->cNtrue[idx] = cN;
 					Event->cEtrue[idx] = cE;
 					// initialize observed values here; noise added later in photometry
@@ -230,10 +230,10 @@ void lightcurveGenerator(struct filekeywords* Paramfile, struct event *Event, st
 				// The lens frame x-axis is along the trajectory at angle alpha
 				// Sky frame: cN = North offset (mas), cE = East offset (mas)
 				// Proper rotation: [N, E] = R(PosAng) * [x1, x2]
-				if (Paramfile->astrometry_on && astrom_ok) 
-				{
-					double cN = cx_mas * cosPos + cy_mas * sinPos;   // North (mas)
-					double cE = -cx_mas * sinPos + cy_mas * cosPos;  // East (mas)
+			if (Paramfile->astrometry_on && astrom_ok) 
+			{
+				double cN = cx_mas * cosPos - cy_mas * sinPos;   // North (mas)
+				double cE = cx_mas * sinPos + cy_mas * cosPos;    // East (mas)
 					Event->cNtrue[idx] = cN;  // sky NE
 					Event->cEtrue[idx] = cE;
 					Event->cNobs[idx] = cN;   // initialize observed (noise added in photometry)

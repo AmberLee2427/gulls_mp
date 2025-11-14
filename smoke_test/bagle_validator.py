@@ -492,11 +492,6 @@ def convert_to_bagle_params(out_params: Dict[str, Any], simulation_zero_time: fl
         raise ValueError(f"Geometry invalid: lens must be in front of source: dL={params['dL']} pc, dS={params['dS']} pc")
     params['dL_dS'] = params['dL'] / params['dS']
 
-    # Astrometric reference – keep explicit zeros for origin definition
-    # this is wrong!!! see /Users/malpas.1/Code/BAGLE_Microlensing/model_fit_tutorial.txt
-    params['xS0_E'] = 0.0  # source position at t0
-    params['xS0_N'] = 0.0
-
     # Proper motions: gulls outputs are Galactic (l,b) mas/yr; BAGLE wants RA/Dec (E,N) mas/yr.
     # Transform using astropy.
     from astropy.coordinates import SkyCoord
@@ -528,6 +523,25 @@ def convert_to_bagle_params(out_params: Dict[str, Any], simulation_zero_time: fl
     # tE could be off by ~1e3, broadening the light curve and shifting the peak. Track this if peak lag persists.
     if not (np.isfinite(params['muS_E']) and np.isfinite(params['muS_N'])):
         raise ValueError("Source proper motions transformed to ICRS are non-finite (mas/yr). Check input mul/mub.")
+
+    # Astrometric reference – source position relative to lens at t0 (arcsec)
+    v_rel_E = params['muS_E'] - params['muL_E']
+    v_rel_N = params['muS_N'] - params['muL_N']
+    v_hat_norm = np.hypot(v_rel_E, v_rel_N)
+    if v_hat_norm == 0.0:
+        raise ValueError("Relative proper motion vector is zero; cannot define perpendicular u0 orientation.")
+    v_hat_E = v_rel_E / v_hat_norm
+    v_hat_N = v_rel_N / v_hat_norm
+    perp_E = v_hat_N
+    perp_N = -v_hat_E
+    sgn = 1.0 if raw_u0 >= 0.0 else -1.0
+    u_hat_E = perp_E * sgn
+    u_hat_N = perp_N * sgn
+    v_hat_vec = np.array([v_hat_E, v_hat_N])
+    u_hat_vec = np.array([u_hat_E, u_hat_N])
+    thetaS0_mas = abs(raw_u0) * thetaE
+    params['xS0_E'] = (thetaS0_mas * u_hat_E) * 1e-3  # arcsec
+    params['xS0_N'] = (thetaS0_mas * u_hat_N) * 1e-3
 
     # Sanity check against catalog-provided relative PM if available
     if 'murel_ref' in out_params:
@@ -567,20 +581,6 @@ def convert_to_bagle_params(out_params: Dict[str, Any], simulation_zero_time: fl
     db_s = abs(source_gal_rt.pm_b.to_value(u.mas/u.yr) - float(out_params['Source_mub']))
     if dl_s > 1e-4 or db_s > 1e-4:
         raise ValueError(f"Source PM round-trip mismatch: Δpm_l_cosb={dl_s:.3e}, Δpm_b={db_s:.3e} mas/yr")
-
-    # Map GULLS alpha (relative angle) to BAGLE alpha (axis orientation on sky):
-    #   Let φ_v be the sky angle of the relative proper motion v_rel (mas/yr), with components (E,N) matching [sin, cos].
-    #   GULLS stores alpha_rel = angle between trajectory direction and the binary axis (same handedness).
-    #   Therefore the binary axis sky angle is φ_axis = φ_v − alpha_rel (mod 360°).
-    #   BAGLE expects alpha as the binary axis orientation on the sky used in lens offsets (offset ~ [sin α, cos α]).
-    v_rel_E = params['muS_E'] - params['muL_E']
-    v_rel_N = params['muS_N'] - params['muL_N']
-    phi_v = float(np.degrees(np.arctan2(v_rel_E, v_rel_N)))  # degrees, consistent with [sin, cos]
-    # BAGLE uses alpha such that lens offset vector = 0.5*sep*[sin(alpha), cos(alpha)].
-    # We want axis orientation on sky (alpha_bagle) consistent with the relative PM direction and GULLS alpha_rel:
-    # Required: alpha_bagle = (phi_v − alpha_rel) mod 360°.
-    alpha_axis_deg = (phi_v - params['alpha_raw_rel']) % 360.0
-    params['alpha'] = alpha_axis_deg
 
     # Parallax – required (scalar amplitude only for Param1). Directional components (piEN, piEE) are intentionally ignored:
     # Receipt: PSBL_PhotAstrom_Par_Param1 signature includes only |piE|. Relative proper motion provides directional info.
@@ -672,25 +672,17 @@ def convert_to_bagle_params(out_params: Dict[str, Any], simulation_zero_time: fl
     if not (np.isfinite(thetaE) and thetaE > 0):
         raise ValueError(f"thetaE must be positive finite (mas); got {thetaE!r}")
 
-    # Compute actual motion angle phi_v and binary-axis absolute angle phi_axis on sky (radians)
-    phi_v = float(np.arctan2(v_rel_E, v_rel_N))
-    phi_axis = phi_v - alpha_rel_rad
+    cos_a = np.cos(alpha_rel_rad)
+    sin_a = np.sin(alpha_rel_rad)
+    axis_hat_E = v_hat_vec[0] * cos_a - v_hat_vec[1] * sin_a
+    axis_hat_N = v_hat_vec[0] * sin_a + v_hat_vec[1] * cos_a
+    axis_hat_vec = np.array([axis_hat_E, axis_hat_N])
 
-    # Axis unit vector in sky (E, N)
-    axis_hat_E = float(np.sin(phi_axis))
-    axis_hat_N = float(np.cos(phi_axis))
-    # Motion unit vector in sky (E, N)
-    v_hat_E = v_rel_E / v_rel_mag
-    v_hat_N = v_rel_N / v_rel_mag
-
-    # Projection of delta (lens1->midpoint) onto motion direction (dimensionless, ER)
-    proj_parallel_ER = delta_x_ER * (axis_hat_E * v_hat_E + axis_hat_N * v_hat_N)
-
-    # Time offset in days: Δt = - proj_parallel_ER * tE_days (negative when shifting origin forward along motion)
+    delta_vec_ER = delta_x_ER * axis_hat_vec
+    proj_parallel_ER = float(np.dot(delta_vec_ER, v_hat_vec))
     delta_t_days = -proj_parallel_ER * tE_days_out
 
-    # Perpendicular component adjusts signed impact parameter beta (mas)
-    delta_u_ER = delta_x_ER * np.sin(alpha_rel_rad)
+    delta_u_ER = float(np.dot(delta_vec_ER, u_hat_vec))
     delta_u_mas = delta_u_ER * thetaE
 
     original_t0 = params['t0']
@@ -716,12 +708,14 @@ def convert_to_bagle_params(out_params: Dict[str, Any], simulation_zero_time: fl
         'beta_midpoint_mas': params['beta'],
         'v_rel_mag_mas_per_yr': v_rel_mag,
         'alpha_rel_deg': params['alpha_raw_rel'],
-        'phi_v_deg': float(np.degrees(phi_v)),
-        'phi_axis_deg': float(np.degrees(phi_axis)),
+        'phi_v_deg': float(np.degrees(np.arctan2(v_hat_vec[0], v_hat_vec[1]))),
+        'phi_axis_deg': float(np.degrees(np.arctan2(axis_hat_E, axis_hat_N))),
     }
 
     # Store reparameterized midpoint t0 separately
     params['t0_midpoint'] = params['t0']
+    axis_angle_deg = (np.degrees(np.arctan2(axis_hat_E, axis_hat_N))) % 360.0
+    params['alpha'] = axis_angle_deg
 
     # Assert sep/thetaE equals Planet_s (unit consistency)
     s_out = float(out_params['Planet_s'])
@@ -1068,10 +1062,10 @@ def plot_validation(times_bjd, gulls_data, bagle_data, params, output_file, even
             raise RuntimeError(f"{context} series '{key}' contains non-finite values.")
         return arr
 
-    gulls_abs_N = _require_series(gulls_data, 'sky_centroid_N_mas_aligned', 'gulls_data')
-    gulls_abs_E = _require_series(gulls_data, 'sky_centroid_E_mas_aligned', 'gulls_data')
-    bagle_abs_N = _require_series(bagle_data, 'sky_centroid_N_mas_aligned', 'bagle_data')
-    bagle_abs_E = _require_series(bagle_data, 'sky_centroid_E_mas_aligned', 'bagle_data')
+    gulls_abs_N = _require_series(gulls_data, 'sky_centroid_N_mas', 'gulls_data')
+    gulls_abs_E = _require_series(gulls_data, 'sky_centroid_E_mas', 'gulls_data')
+    bagle_abs_N = _require_series(bagle_data, 'sky_centroid_N_mas', 'bagle_data')
+    bagle_abs_E = _require_series(bagle_data, 'sky_centroid_E_mas', 'bagle_data')
     lens_rel_x_gulls = _require_series(gulls_data, 'lens_rel_x', 'gulls_data')
     lens_rel_y_gulls = _require_series(gulls_data, 'lens_rel_y', 'gulls_data')
     lens_rel_x_bagle = _require_series(bagle_data, 'lens_rel_x', 'bagle_data')
@@ -1108,8 +1102,8 @@ def plot_validation(times_bjd, gulls_data, bagle_data, params, output_file, even
     ax3.grid(alpha=0.3)
     
     ax4 = fig.add_subplot(gs[1, 0])
-    ax4.plot(times_bjd, gulls_abs_N, 'b.', label='gulls sky centroid (aligned)', alpha=0.5, markersize=2)
-    ax4.plot(times_bjd, bagle_abs_N, 'r-', label='BAGLE sky centroid (aligned)', alpha=0.7)
+    ax4.plot(times_bjd, gulls_abs_N, 'b.', label='gulls sky centroid', alpha=0.5, markersize=2)
+    ax4.plot(times_bjd, bagle_abs_N, 'r-', label='BAGLE sky centroid', alpha=0.7)
     # Optional: show raw shift for reference (faint)
     ax4.plot(times_bjd, bagle_data['shift_N'], color='r', linestyle=':', alpha=0.3, label='BAGLE shift (rel)')
     ax4.axvline(t0_used, color='k', linestyle='--', alpha=0.6)
@@ -1117,26 +1111,26 @@ def plot_validation(times_bjd, gulls_data, bagle_data, params, output_file, even
     ax4.axvline(t0_mid, color='gray', linestyle='--', alpha=0.4)
     ax4.axvline(t_ref, color='green', linestyle='-.', alpha=0.5)
     ax4.axhline(0, color='gray', linestyle=':', alpha=0.3)
-    ax4.set_xlabel('Time (MJD)'); ax4.set_ylabel('North Shift (mas, aligned to first epoch)'); ax4.set_title('Astrometry: North sky centroid (aligned)')
+    ax4.set_xlabel('Time (MJD)'); ax4.set_ylabel('North Shift (mas)'); ax4.set_title('Astrometry: North sky centroid')
     ax4.legend(); ax4.grid(alpha=0.3)
     
     ax5 = fig.add_subplot(gs[1, 1])
-    ax5.plot(times_bjd, gulls_abs_E, 'b.', label='gulls sky centroid (aligned)', alpha=0.5, markersize=2)
-    ax5.plot(times_bjd, bagle_abs_E, 'r-', label='BAGLE sky centroid (aligned)', alpha=0.7)
+    ax5.plot(times_bjd, gulls_abs_E, 'b.', label='gulls sky centroid', alpha=0.5, markersize=2)
+    ax5.plot(times_bjd, bagle_abs_E, 'r-', label='BAGLE sky centroid', alpha=0.7)
     ax5.plot(times_bjd, bagle_data['shift_E'], color='r', linestyle=':', alpha=0.3, label='BAGLE shift (rel)')
     ax5.axvline(t0_used, color='k', linestyle='--', alpha=0.6)
     ax5.axvline(t0_orig, color='purple', linestyle='--', alpha=0.5)
     ax5.axvline(t0_mid, color='gray', linestyle='--', alpha=0.4)
     ax5.axvline(t_ref, color='green', linestyle='-.', alpha=0.5)
     ax5.axhline(0, color='gray', linestyle=':', alpha=0.3)
-    ax5.set_xlabel('Time (MJD)'); ax5.set_ylabel('East Shift (mas, aligned to first epoch)'); ax5.set_title('Astrometry: East sky centroid (aligned)')
+    ax5.set_xlabel('Time (MJD)'); ax5.set_ylabel('East Shift (mas)'); ax5.set_title('Astrometry: East sky centroid')
     ax5.legend(); ax5.grid(alpha=0.3)
     
     ax6 = fig.add_subplot(gs[1, 2])
     scatter = ax6.scatter(gulls_abs_E, gulls_abs_N,
-                          c=times_bjd, cmap='viridis', s=20, alpha=0.6, label='gulls sky centroid (aligned)')
+                          c=times_bjd, cmap='viridis', s=20, alpha=0.6, label='gulls sky centroid')
     ax6.plot(bagle_abs_E,
-             bagle_abs_N, 'r-', alpha=0.5, linewidth=1, label='BAGLE sky centroid (aligned)')
+             bagle_abs_N, 'r-', alpha=0.5, linewidth=1, label='BAGLE sky centroid')
     ax6.plot(bagle_data['shift_E'], bagle_data['shift_N'], color='r', linestyle=':', alpha=0.3, linewidth=1, label='BAGLE shift (rel)')
     if lens_rel_x_gulls.size and lens_rel_x_bagle.size and source_x_series.size == lens_rel_x_gulls.size:
         ax6.plot(lens_rel_x_gulls + source_x_series,
@@ -1144,7 +1138,7 @@ def plot_validation(times_bjd, gulls_data, bagle_data, params, output_file, even
         ax6.plot(lens_rel_x_bagle + source_x_series,
                  lens_rel_y_bagle + source_y_series, color='magenta', linestyle='--', alpha=0.4, label='BAGLE lens-frame (rel)')
     ax6.plot(0, 0, 'k+', markersize=10, markeredgewidth=2, label='Unlensed')
-    ax6.set_xlabel('East (mas)'); ax6.set_ylabel('North (mas)'); ax6.set_title('Sky (aligned centroids, N=up, E=right)')
+    ax6.set_xlabel('East (mas)'); ax6.set_ylabel('North (mas)'); ax6.set_title('Sky (absolute centroids, N=up, E=right)')
     ax6.legend(); ax6.grid(alpha=0.3); ax6.axis('equal')
     cbar = plt.colorbar(scatter, ax=ax6); cbar.set_label('MJD')
     
@@ -1595,13 +1589,9 @@ def validate_event(out_file, lc_file, simulation_zero_time, multiple_sources, pa
         # Apparent sky-plane centroid (geocentric frame, lensed ensemble) in mas
         'bagle_sky_centroid_E_mas': np.asarray(bagle_data.get('sky_centroid_E_mas', []), dtype=float),
         'bagle_sky_centroid_N_mas': np.asarray(bagle_data.get('sky_centroid_N_mas', []), dtype=float),
-        'bagle_sky_centroid_E_mas_aligned': np.asarray(bagle_data.get('sky_centroid_E_mas_aligned', []), dtype=float),
-        'bagle_sky_centroid_N_mas_aligned': np.asarray(bagle_data.get('sky_centroid_N_mas_aligned', []), dtype=float),
     # Deprecated compatibility aliases for downstream tooling expecting the old naming.
     'centroid_abs_E_mas': np.asarray(bagle_data.get('sky_centroid_E_mas', []), dtype=float),
     'centroid_abs_N_mas': np.asarray(bagle_data.get('sky_centroid_N_mas', []), dtype=float),
-    'centroid_abs_E_aligned': np.asarray(bagle_data.get('sky_centroid_E_mas_aligned', []), dtype=float),
-    'centroid_abs_N_aligned': np.asarray(bagle_data.get('sky_centroid_N_mas_aligned', []), dtype=float),
         'bagle_lens_rel_x_er': np.asarray(bagle_data.get('lens_rel_x', []), dtype=float),
         'bagle_lens_rel_y_er': np.asarray(bagle_data.get('lens_rel_y', []), dtype=float),
         'rotation_NE_to_lens': np.asarray(bagle_data.get('rotation_NE_to_lens', np.empty((2, 2)))),
@@ -1639,24 +1629,14 @@ def validate_event(out_file, lc_file, simulation_zero_time, multiple_sources, pa
     if not (bagle_sky_centroid_N_mas.size == bagle_sky_centroid_E_mas.size == gulls_sky_centroid_N_mas.size == len(times_bjd)):
         raise RuntimeError("Sky-plane astrometry arrays length mismatch between GULLS and BAGLE predictions.")
 
-    # Align to first epoch to remove constant offsets (lens vs source origin choices)
-    bagle_sky_centroid_N_aligned = bagle_sky_centroid_N_mas - bagle_sky_centroid_N_mas[0]
-    bagle_sky_centroid_E_aligned = bagle_sky_centroid_E_mas - bagle_sky_centroid_E_mas[0]
-    gulls_sky_centroid_N_aligned = gulls_sky_centroid_N_mas - gulls_sky_centroid_N_mas[0]
-    gulls_sky_centroid_E_aligned = gulls_sky_centroid_E_mas - gulls_sky_centroid_E_mas[0]
-
-    # BAGLE sky-plane centroid (geocentric, matched to GULLS observer) in mas relative to lens RA/Dec origin.
-    bagle_data['sky_centroid_N_mas_aligned'] = bagle_sky_centroid_N_aligned
-    bagle_data['sky_centroid_E_mas_aligned'] = bagle_sky_centroid_E_aligned
-    # Geocentric sky-plane centroid (North/East, mas) of the lensed image ensemble, blended identically to
-    # the light curve and referenced to the lens RA/Dec origin.
-    gulls_data['sky_centroid_N_mas_aligned'] = gulls_sky_centroid_N_aligned
-    gulls_data['sky_centroid_E_mas_aligned'] = gulls_sky_centroid_E_aligned
+    # Record absolute sky centroids for downstream plots/diagnostics
+    bagle_data['sky_centroid_N_mas'] = bagle_sky_centroid_N_mas
+    bagle_data['sky_centroid_E_mas'] = bagle_sky_centroid_E_mas
     gulls_data['sky_centroid_N_mas'] = gulls_sky_centroid_N_mas
     gulls_data['sky_centroid_E_mas'] = gulls_sky_centroid_E_mas
 
-    N_diff = gulls_sky_centroid_N_aligned - bagle_sky_centroid_N_aligned
-    E_diff = gulls_sky_centroid_E_aligned - bagle_sky_centroid_E_aligned
+    N_diff = gulls_sky_centroid_N_mas - bagle_sky_centroid_N_mas
+    E_diff = gulls_sky_centroid_E_mas - bagle_sky_centroid_E_mas
     sky_offset_N_mean = float(np.mean(gulls_sky_centroid_N_mas - bagle_sky_centroid_N_mas))
     sky_offset_E_mean = float(np.mean(gulls_sky_centroid_E_mas - bagle_sky_centroid_E_mas))
     sky_offset_mean_mag = float(np.hypot(sky_offset_N_mean, sky_offset_E_mean))
@@ -1762,16 +1742,12 @@ def validate_event(out_file, lc_file, simulation_zero_time, multiple_sources, pa
                 'gulls_src_y_ER': gulls_data.get('source_y', np.full_like(times_bjd, np.nan)),
                 'gulls_sky_centroid_N_mas': gulls_data.get('sky_centroid_N_mas', np.full_like(times_bjd, np.nan)),
                 'gulls_sky_centroid_E_mas': gulls_data.get('sky_centroid_E_mas', np.full_like(times_bjd, np.nan)),
-                'gulls_sky_centroid_N_mas_aligned': gulls_data.get('sky_centroid_N_mas_aligned', np.full_like(times_bjd, np.nan)),
-                'gulls_sky_centroid_E_mas_aligned': gulls_data.get('sky_centroid_E_mas_aligned', np.full_like(times_bjd, np.nan)),
                 'gulls_lens_rel_x_ER': gulls_data.get('lens_rel_x', np.full_like(times_bjd, np.nan)),
                 'gulls_lens_rel_y_ER': gulls_data.get('lens_rel_y', np.full_like(times_bjd, np.nan)),
                 'bagle_shift_E_mas': np.asarray(bagle_data.get('shift_E', np.full_like(times_bjd, np.nan)), dtype=float),
                 'bagle_shift_N_mas': np.asarray(bagle_data.get('shift_N', np.full_like(times_bjd, np.nan)), dtype=float),
                 'bagle_sky_centroid_E_mas': np.asarray(bagle_data.get('sky_centroid_E_mas', np.full_like(times_bjd, np.nan)), dtype=float),
                 'bagle_sky_centroid_N_mas': np.asarray(bagle_data.get('sky_centroid_N_mas', np.full_like(times_bjd, np.nan)), dtype=float),
-                'bagle_sky_centroid_E_mas_aligned': np.asarray(bagle_data.get('sky_centroid_E_mas_aligned', np.full_like(times_bjd, np.nan)), dtype=float),
-                'bagle_sky_centroid_N_mas_aligned': np.asarray(bagle_data.get('sky_centroid_N_mas_aligned', np.full_like(times_bjd, np.nan)), dtype=float),
                 'bagle_lens_rel_x_ER': np.asarray(bagle_data.get('lens_rel_x', np.full_like(times_bjd, np.nan)), dtype=float),
                 'bagle_lens_rel_y_ER': np.asarray(bagle_data.get('lens_rel_y', np.full_like(times_bjd, np.nan)), dtype=float),
                 'thetaE_mas': float(bagle_params.get('thetaE', np.nan)),
