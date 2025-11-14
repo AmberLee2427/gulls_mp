@@ -55,8 +55,10 @@ def read_gulls_lightcurve(lc_file: Path) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     meta: Dict[str, Any] = {}
     if planet_vals is not None:
         meta['planet_vals'] = planet_vals
-    if event_vals is not None:
-        meta['event_vals'] = event_vals
+    # Enforce presence of #Event header for current codebase outputs (outputLightcurve.cpp always writes it)
+    if event_vals is None:
+        raise ValueError(f"Missing required #Event header in {lc_file.name}")
+    meta['event_vals'] = event_vals
     if fs_val is not None:
         meta['fs'] = fs_val
     return df, meta

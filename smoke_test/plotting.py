@@ -1,4 +1,10 @@
-"""Plotting helpers for smoke test lightcurve products."""
+"""Plotting helpers for smoke test lightcurve products.
+
+Strict policy (see AGENTS.md):
+- Warnings are allowed (runner sets default filtering so receipts surface).
+- NumPy FP errors raise immediately (divide/invalid/overflow/underflow).
+- Transform assumptions (frames/units) documented inline; violations raise SmokeTestError.
+"""
 from __future__ import annotations
 
 import math
@@ -9,6 +15,7 @@ from typing import Dict, List, Tuple
 import matplotlib
 import numpy as np
 import pandas as pd
+import warnings
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -20,43 +27,20 @@ import astropy.units as u
 from .constants import REPO_ROOT
 from .lightcurve_io import read_gulls_lightcurve
 from .errors import SmokeTestError
+from .utils import (
+    derive_event_key,
+    galactic_pm_to_icrs,
+    compute_vbm_model,
+)
 
-candidate = (REPO_ROOT.parent / "VBMicrolensing").resolve()
-if candidate.is_dir():
-    sys.path.append(str(candidate))
-
-from VBMicrolensing import VBMicrolensing as VBMicrolensingClass  # type: ignore[attr-defined]
-
-VBM_CLASS = VBMicrolensingClass  # type: ignore
-
-
-def _derive_event_key(lc_file: Path) -> Tuple[int, int, int] | None:
-    stem = lc_file.stem.split(".", 1)[0]
-    parts = stem.rsplit("_", 3)
-    if len(parts) < 4:
-        return None
-    return tuple(int(part) for part in parts[-3:])
-
+# Enforce brittleness at import time too (in case this module is run outside the runner)
+np.seterr(all="raise")
 
 def _format_metric(value: float | None, precision: int = 3) -> str:
+    # Deprecated: Avoid tolerant display of physics; prefer strict extraction below.
     if value is None or math.isnan(value):
-        return "n/a"
-    return f"{value:.{precision}f}"
-
-
-def _galactic_pm_to_icrs(l_deg: float, b_deg: float, mu_l: float, mu_b: float) -> Tuple[float, float]:
-    coord = SkyCoord(
-        l=l_deg * u.deg,
-        b=b_deg * u.deg,
-        pm_l_cosb=mu_l * u.mas / u.yr,
-        pm_b=mu_b * u.mas / u.yr,
-        frame="galactic",
-    )
-    icrs = coord.icrs
-    return (
-        icrs.pm_ra_cosdec.to_value(u.mas / u.yr),
-        icrs.pm_dec.to_value(u.mas / u.yr),
-    )
+        raise SmokeTestError("Unexpected missing metric in _format_metric; use strict extractors instead.")
+    return f"{float(value):.{precision}f}"
 
 
 ## Header parsing moved to shared helper read_gulls_lightcurve
@@ -109,153 +93,7 @@ def _plot_photometry_only(
     return plot_file
 
 
-def _compute_vbm_model(
-    summary: Dict[str, float] | None,
-    planet_vals: List[float] | None,
-    event_vals: List[float] | None,
-    source_pm_icrs: Tuple[float, float] | None,
-    lens_pm_icrs: Tuple[float, float] | None,
-    theta_e_float: float | None,
-    source_dist_float: float | None,
-    event_ra_float: float | None,
-    event_dec_float: float | None,
-    alpha_deg_float: float,
-    sim_zero_offset: float,
-    time: np.ndarray,
-    true_x_vals: np.ndarray | None,
-    true_y_vals: np.ndarray | None,
-) -> Tuple[Dict[str, np.ndarray | str] | None, str | None]:
-    if summary is None:
-        return None, "summary metrics missing for this lightcurve"
-    if not (
-        planet_vals
-        and len(planet_vals) >= 6
-        and event_vals
-        and len(event_vals) >= 8
-    ):
-        return None, "header missing #Planet/#Event metadata"
-
-    q_val = float(planet_vals[4])
-    s_val = float(planet_vals[5])
-    if q_val <= 0 or s_val <= 0:
-        return None, f"unphysical planet parameters (q={q_val}, s={s_val})"
-
-    rho_val = summary.get("rho")
-    if rho_val is None or math.isnan(rho_val):
-        rho_val = float(event_vals[7])
-    tE_val = summary.get("tE_ref")
-    if tE_val is None or math.isnan(tE_val):
-        tE_val = float(event_vals[6])
-    u0_val = summary.get("u0")
-    if u0_val is None or math.isnan(u0_val):
-        u0_val = float(event_vals[0])
-    alpha_deg = summary.get("alpha_event")
-    if alpha_deg is None or math.isnan(alpha_deg):
-        alpha_deg = float(event_vals[1])
-    t0_val = summary.get("t0")
-    if t0_val is None or math.isnan(t0_val):
-        t0_val = float(event_vals[2])
-    pi_n_val = summary.get("pi_n")
-    pi_e_val = summary.get("pi_e")
-    if pi_n_val is None or math.isnan(pi_n_val):
-        pi_n_val = 0.0
-    if pi_e_val is None or math.isnan(pi_e_val):
-        pi_e_val = 0.0
-
-    if (
-        theta_e_float is None
-        or theta_e_float <= 0
-        or source_dist_float is None
-        or source_dist_float <= 0
-        or source_pm_icrs is None
-        or event_ra_float is None
-        or event_dec_float is None
-    ):
-        return None, "insufficient astrometric metadata (theta_E, source distance, or PM)"
-
-    pi_s_val = 1.0 / source_dist_float
-    if (
-        pi_s_val <= 0
-        or rho_val is None
-        or float(rho_val) <= 0
-        or tE_val is None
-        or float(tE_val) <= 0
-    ):
-        return None, "missing positive rho/tE/source distance for VBM evaluation"
-
-    vbm = VBM_CLASS()  # type: ignore[operator]
-    skycoord = SkyCoord(
-        ra=float(event_ra_float) * u.deg,
-        dec=float(event_dec_float) * u.deg,
-    )
-    coord_str = (
-        f"{skycoord.ra.to_string(unit=u.hour, sep=':', pad=True)} "
-        f"{skycoord.dec.to_string(unit=u.deg, sep=':', pad=True, alwayssign=True)}"
-    )
-    vbm.SetObjectCoordinates(coord_str)
-    params_vbm = [
-        math.log(float(s_val)),
-        math.log(float(q_val)),
-        float(u0_val),
-        math.radians(float(alpha_deg)),
-        math.log(float(rho_val)),
-        math.log(float(tE_val)),
-        float(t0_val) + sim_zero_offset,
-        float(pi_n_val),
-        float(pi_e_val),
-        float(source_pm_icrs[1]),
-        float(source_pm_icrs[0]),
-        float(pi_s_val),
-        float(theta_e_float),
-    ]
-    results = vbm.BinaryAstroLightCurve(params_vbm, time + sim_zero_offset)
-
-    lens_dec_deg = np.array(results[3], dtype=float)
-    lens_ra_deg = np.array(results[4], dtype=float)
-    y1 = np.array(results[5], dtype=float)
-    y2 = np.array(results[6], dtype=float)
-    lensframe_label = "Source Trajectory BinaryAstroLightCurve"
-
-    vbm_x = y1
-    vbm_y = y2
-    if (
-        true_x_vals is not None
-        and true_y_vals is not None
-        and len(true_x_vals) == len(y1)
-    ):
-        combos = [
-            ("x= y1, y= y2", y1, y2),
-            ("x=-y1, y= y2", -y1, y2),
-            ("x= y1, y=-y2", y1, -y2),
-            ("x=-y1, y=-y2", -y1, -y2),
-            ("x= y2, y= y1", y2, y1),
-            ("x=-y2, y= y1", -y2, y1),
-            ("x= y2, y=-y1", y2, -y1),
-            ("x=-y2, y=-y1", -y2, -y1),
-        ]
-        best = None
-        best_err = None
-        for label, cand_x, cand_y in combos:
-            err = np.nanmean((cand_x - true_x_vals) ** 2 + (cand_y - true_y_vals) ** 2)
-            if best_err is None or err < best_err:
-                best_err = err
-                best = (label, cand_x, cand_y)
-        if best:
-            lensframe_label = f"Source trajectory BinaryAstroLightCurve ({best[0]})"
-            vbm_x, vbm_y = best[1], best[2]
-
-    if len(vbm_x) != len(time):
-        return None, "VBM returned mismatched array lengths"
-
-    model: Dict[str, np.ndarray | str] = {
-        "lens_x": vbm_x,
-        "lens_y": vbm_y,
-        "lens_label": lensframe_label,
-        "sky_ra": lens_ra_deg,
-        "sky_dec": lens_dec_deg,
-        "sky_label": "VBM BinaryAstroLightCurve (sky)",
-    }
-    return model, None
+# Non-plotting helpers moved to utils.py (compute_vbm_model, galactic_pm_to_icrs, derive_event_key)
 
 
 def _render_lensframe(
@@ -269,12 +107,22 @@ def _render_lensframe(
     true_y_vals: np.ndarray | None,
     meas_x: np.ndarray | None,
     meas_y: np.ndarray | None,
+    src_x: np.ndarray | None,
+    src_y: np.ndarray | None,
+    pm_ref_alpha_float: float,
+    pm_ref_delta_float: float,
+    alpha_deg_float: float,
+    true_E_mas: np.ndarray | None = None,
+    true_N_mas: np.ndarray | None = None,
+    bagle_shift_E_mas: np.ndarray | None = None,
+    bagle_shift_N_mas: np.ndarray | None = None,
+    bagle_thetaE_mas: float | None = None,
 ) -> Path:
     vbm_x = np.asarray(vbm_model["lens_x"])  # type: ignore[index]
     vbm_y = np.asarray(vbm_model["lens_y"])  # type: ignore[index]
     vbm_label = str(vbm_model["lens_label"])
 
-    fig2, ax2 = plt.subplots(figsize=(6, 6))
+    fig2, (ax2, ax3) = plt.subplots(1, 2, figsize=(12, 6))
 
     if meas_x is not None and meas_y is not None:
         mask_meas = np.isfinite(meas_x) & np.isfinite(meas_y)
@@ -287,7 +135,7 @@ def _render_lensframe(
                 norm=norm,
                 s=25,
                 alpha=0.6,
-                label="Measured centroid",
+                label="Blended centroid samples",
                 zorder=1,
             )
     else:
@@ -326,6 +174,21 @@ def _render_lensframe(
         label=vbm_label,
         zorder=3,
     )
+
+    # Draw the blended centroid trajectory as a dashed cyan line on top of other artists
+    if meas_x is not None and meas_y is not None:
+        mask_meas = np.isfinite(meas_x) & np.isfinite(meas_y)
+        if np.any(mask_meas):
+            ax2.plot(
+                np.asarray(meas_x)[mask_meas],
+                np.asarray(meas_y)[mask_meas],
+                linestyle="--",
+                color="cyan",
+                linewidth=2.0,
+                alpha=0.95,
+                label="Blended centroid trajectory",
+                zorder=10,
+            )
     ax2.set_xlabel("x_centroid (Einstein radii)")
     ax2.set_ylabel("y_centroid (Einstein radii)")
     ax2.set_title(f"Lens-frame Centroid: {lc_file.stem}")
@@ -357,17 +220,319 @@ def _render_lensframe(
     ax2.set_xlim(x_c - half_span, x_c + half_span)
     ax2.set_ylim(y_c - half_span, y_c + half_span)
     ax2.set_aspect("equal", adjustable="box")
-    ax2.legend(loc="upper left")
+    
 
     sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
     sm.set_array([])
     cbar2 = fig2.colorbar(sm, ax=ax2, fraction=0.046, pad=0.04)
     cbar2.set_label("Time (days)")
 
+    # --- Deterministic rotation mapping from sky (N,E) to lens-frame (x,y) using μ and α ---
+    # From VBMicrolensing BinaryAstroLightCurve definitions (x=y1, y=y2):
+    #   x =  u sinα − tn cosα
+    #   y = −u cosα − tn sinα
+    # With e_t along μ_rel and e_n = R(+90°) e_t, we have [tn,u]^T = R_NE2TN_U [N,E]^T where
+    #   R_NE2TN_U = [[cos φ_μ, sin φ_μ], [−sin φ_μ, cos φ_μ]] and
+    #   A(α) = [[−cosα, sinα], [−sinα, −cosα]].
+    # Therefore R_NE→XY = A(α) @ R_NE2TN_U, which must be a proper rotation [[c,s], [−s,c]].
+    if any(math.isnan(v) for v in (pm_ref_alpha_float, pm_ref_delta_float, alpha_deg_float)):
+        raise SmokeTestError("Rotation diagnostic requires finite pm_ref_alpha, pm_ref_delta, and alpha_event.")
+    muN = float(pm_ref_delta_float)
+    muE = float(pm_ref_alpha_float)
+    if muN == 0.0 and muE == 0.0:
+        raise SmokeTestError("Relative proper motion vector is zero; cannot define along-track axis.")
+    phi_mu = float(math.atan2(muE, muN))
+    ct = float(math.cos(phi_mu)); st = float(math.sin(phi_mu))
+    R_NE2TN_U = np.array([[ct, st], [-st, ct]], dtype=float)
+    ca = float(math.cos(math.radians(alpha_deg_float))); sa = float(math.sin(math.radians(alpha_deg_float)))
+    A_alpha = np.array([[-ca,  sa], [-sa, -ca]], dtype=float)
+    R = A_alpha @ R_NE2TN_U
+    c_est = float(R[0, 0]); s_est = float(R[0, 1])
+    if not (np.allclose(R[1, 0], -s_est, atol=1e-6) and np.allclose(R[1, 1], c_est, atol=1e-6)):
+        raise SmokeTestError("Derived rotation is not orthonormal within 1e-6; check pm_ref and alpha inputs.")
+
+    # Temporary diagnostic: report rotation built from μ and α.
+    # The rotation has φ_est such that [x, y]^T = R(φ_est) [N, E]^T with
+    #   R(φ) = [[cos φ, sin φ], [-sin φ, cos φ]].
+    phi_est_rad = float(np.arctan2(s_est, c_est))
+    phi_mu_rad = float(math.atan2(muE, muN))
+    alpha_rad = float(math.radians(alpha_deg_float))
+    phi_axis_exp_rad = float(phi_mu_rad - alpha_rad)
+    def _wrap_pi(a: float) -> float:
+        return float((a + math.pi) % (2 * math.pi) - math.pi)
+    def _wrap_pi_half(a: float) -> float:
+        # map to (-pi/2, pi/2]
+        return float(((a + 0.5 * math.pi) % math.pi) - 0.5 * math.pi)
+
+    delta_mod_pi_rad = abs(_wrap_pi_half(phi_est_rad - phi_axis_exp_rad))
+    delta_deg = abs(math.degrees(delta_mod_pi_rad))
+    # Soft report: print and annotate in-figure (no warnings; env treats warnings as errors)
+    # Report both candidates and which was chosen
+    print(
+        f"  NE↔lens rotation check for {lc_file.name}: "
+        f"phi_est={math.degrees(phi_est_rad)%360:.2f}°, "
+        f"phi_mu={math.degrees(phi_mu_rad)%360:.2f}°, "
+        f"alpha={alpha_deg_float:.2f}°, "
+        f"phi_mu−alpha={math.degrees(phi_axis_exp_rad)%360:.2f}° (|Δ| mod π={delta_deg:.2f}°)"
+    )
+    # Defer fail-fast until after we render overlays; collect message to raise later
+    rotation_mismatch_msg: str | None = None
+    if delta_mod_pi_rad > 1e-6:
+        rotation_mismatch_msg = (
+            f"Rotation mismatch: |phi_est - (phi_mu - alpha)| mod π = {math.degrees(delta_mod_pi_rad):.4f}° exceeds 1e-6 rad tolerance."
+        )
+
+    # Draw a faint expected-N arrow (from μ, α deterministic mapping) for visual sanity check
+    n_exp = np.array([math.cos(phi_axis_exp_rad), -math.sin(phi_axis_exp_rad)], dtype=float)
+    # Draw in the canonical VBM lens-frame basis (x=y1, y=y2) deterministically; no basis flips/swaps.
+    # Use the same origin as the measured arrows (defined below) if available
+    # Compute arrow geometry here as well to overlay expected-N just under the measured one
+    span_tmp = 2 * half_span
+    arrow_len_tmp = 0.18 * span_tmp
+    padding_tmp = arrow_len_tmp + 0.03 * span_tmp
+    x0_tmp = (x_c - half_span) + padding_tmp
+    y0_tmp = (y_c + half_span) - padding_tmp
+    ax2.annotate(
+        "",
+        xy=(x0_tmp + n_exp[0] * arrow_len_tmp, y0_tmp + n_exp[1] * arrow_len_tmp),
+        xytext=(x0_tmp, y0_tmp),
+        arrowprops=dict(arrowstyle="-", color="tab:blue", linewidth=1.0, alpha=0.35),
+        zorder=11,
+    )
+    ax2.text(
+        x0_tmp + n_exp[0] * arrow_len_tmp * 0.9,
+        y0_tmp + n_exp[1] * arrow_len_tmp * 0.9,
+        "N(sim)",
+        color="tab:blue",
+        fontsize=8,
+        ha="center",
+        va="center",
+        alpha=0.6,
+    )
+    # Annotate the delta in a subtle way
+    ax2.text(
+        0.02,
+        0.02,
+        f"Δφ(N)≈{delta_deg:.1f}°",
+        transform=ax2.transAxes,
+        fontsize=8,
+        color="dimgray",
+        ha="left",
+        va="bottom",
+        alpha=0.8,
+    )
+
+    # If rotation was estimated, draw N and E arrows on lens-frame axes
+    if c_est is not None and s_est is not None:
+        # Lens-frame direction vectors for North and East (unit length in ER)
+        n_dir = np.array([c_est, -s_est], dtype=float)
+        e_dir = np.array([s_est,  c_est], dtype=float)
+        # Normalize for safety
+        def _safe_norm(v: np.ndarray) -> np.ndarray:
+            n = float(np.hypot(v[0], v[1]))
+            return v / n if n > 0 else v
+        n_dir = _safe_norm(n_dir)
+        e_dir = _safe_norm(e_dir)
+        # Arrow placement near top-left, with origin set farther than one arrow length
+        # from the bounds so tips cannot be clipped regardless of rotation.
+        span = 2 * half_span
+        arrow_len = 0.18 * span
+        padding = arrow_len + 0.03 * span
+        x0 = (x_c - half_span) + padding  # x_min + padding
+        y0 = (y_c + half_span) - padding  # y_max - padding
+        ax2.annotate("", xy=(x0 + e_dir[0]*arrow_len, y0 + e_dir[1]*arrow_len), xytext=(x0, y0),
+                     arrowprops=dict(arrowstyle="->", color="tab:green", linewidth=1.8), zorder=12)
+        ax2.text(x0 + e_dir[0]*arrow_len*1.05, y0 + e_dir[1]*arrow_len*1.05, "E",
+                 color="tab:green", fontsize=10, ha="center", va="center")
+        ax2.annotate("", xy=(x0 + n_dir[0]*arrow_len, y0 + n_dir[1]*arrow_len), xytext=(x0, y0),
+                     arrowprops=dict(arrowstyle="->", color="tab:blue", linewidth=1.8), zorder=12)
+        ax2.text(x0 + n_dir[0]*arrow_len*1.05, y0 + n_dir[1]*arrow_len*1.05, "N",
+                 color="tab:blue", fontsize=10, ha="center", va="center")
+
+    # --- Source-frame panel (centroid relative to source position) ---
+    if src_x is not None and src_y is not None:
+        # Compute relative-to-source centroids (if available)
+        rel_meas_x: np.ndarray | None = None
+        rel_meas_y: np.ndarray | None = None
+        rel_true_x: np.ndarray | None = None
+        rel_true_y: np.ndarray | None = None
+
+        if meas_x is not None and meas_y is not None:
+            rel_meas_x = np.asarray(meas_x) - np.asarray(src_x)
+            rel_meas_y = np.asarray(meas_y) - np.asarray(src_y)
+        if true_x_vals is not None and true_y_vals is not None:
+            rel_true_x = np.asarray(true_x_vals) - np.asarray(src_x)
+            rel_true_y = np.asarray(true_y_vals) - np.asarray(src_y)
+
+        if rel_meas_x is not None and rel_meas_y is not None:
+            mask_m = np.isfinite(rel_meas_x) & np.isfinite(rel_meas_y)
+            if np.any(mask_m):
+                ax3.scatter(
+                    rel_meas_x[mask_m],
+                    rel_meas_y[mask_m],
+                    c=time[mask_m],
+                    cmap=cmap,
+                    norm=norm,
+                    s=25,
+                    alpha=0.6,
+                    label="Blended centroid samples (source)",
+                    zorder=1,
+                )
+                # trajectory line
+                ax3.plot(
+                    rel_meas_x[mask_m],
+                    rel_meas_y[mask_m],
+                    linestyle="--",
+                    color="cyan",
+                    linewidth=2.0,
+                    alpha=0.95,
+                    label="Blended centroid trajectory (source)",
+                    zorder=10,
+                )
+        if rel_true_x is not None and rel_true_y is not None:
+            mask_t = np.isfinite(rel_true_x) & np.isfinite(rel_true_y)
+            if np.any(mask_t):
+                ax3.scatter(
+                    rel_true_x[mask_t],
+                    rel_true_y[mask_t],
+                    c=time[mask_t],
+                    cmap=cmap,
+                    norm=norm,
+                    s=18,
+                    marker="x",
+                    linewidths=0.9,
+                    alpha=1.0,
+                    label="True centroid (source)",
+                    zorder=3,
+                )
+
+        # Optional overlay: BAGLE source-frame centroid trajectory mapped into lens-frame ER
+        if (
+            bagle_shift_E_mas is not None and bagle_shift_N_mas is not None and
+            bagle_thetaE_mas is not None and np.isfinite(bagle_thetaE_mas) and bagle_thetaE_mas > 0
+        ):
+            e_er = np.asarray(bagle_shift_E_mas, dtype=float) / float(bagle_thetaE_mas)
+            n_er = np.asarray(bagle_shift_N_mas, dtype=float) / float(bagle_thetaE_mas)
+            mask_b = np.isfinite(e_er) & np.isfinite(n_er)
+            if not np.any(mask_b):
+                raise SmokeTestError("BAGLE overlay present but contains no finite samples.")
+            # Apply previously-computed rotation [x, y]^T = R [N, E]^T; here we pass [n, e]
+            x_b = c_est * n_er[mask_b] + s_est * e_er[mask_b]
+            y_b = -s_est * n_er[mask_b] + c_est * e_er[mask_b]
+            ax3.plot(
+                x_b,
+                y_b,
+                linestyle=":",
+                color="magenta",
+                linewidth=1.8,
+                alpha=0.9,
+                label="BAGLE (source-frame)",
+                zorder=11,
+            )
+            # Defer overlay consistency failure until after saving figure
+            bagle_overlay_mismatch_msg: str | None = None
+            if rel_true_x is not None and rel_true_y is not None:
+                mask_t = np.isfinite(rel_true_x) & np.isfinite(rel_true_y)
+                mask_common = np.zeros_like(mask_b, dtype=bool)
+                mask_common[mask_b] = True
+                mask_common &= mask_t
+                if np.any(mask_common):
+                    dx = x_b - rel_true_x[mask_common]
+                    dy = y_b - rel_true_y[mask_common]
+                    rmse = float(np.sqrt(np.mean(dx*dx + dy*dy)))
+                    if not np.isfinite(rmse):
+                        bagle_overlay_mismatch_msg = "BAGLE overlay RMSE is non-finite."
+                    elif rmse > 5e-3:
+                        bagle_overlay_mismatch_msg = (
+                            f"BAGLE overlay mismatch in source-frame: RMSE={rmse:.4f} ER exceeds 0.005 ER tolerance."
+                        )
+
+        # Autoscale based on available data
+        seg_x: list[np.ndarray] = []
+        seg_y: list[np.ndarray] = []
+        if rel_meas_x is not None and rel_meas_y is not None:
+            mask_m = np.isfinite(rel_meas_x) & np.isfinite(rel_meas_y)
+            if np.any(mask_m):
+                seg_x.append(rel_meas_x[mask_m])
+                seg_y.append(rel_meas_y[mask_m])
+        if rel_true_x is not None and rel_true_y is not None:
+            mask_t = np.isfinite(rel_true_x) & np.isfinite(rel_true_y)
+            if np.any(mask_t):
+                seg_x.append(rel_true_x[mask_t])
+                seg_y.append(rel_true_y[mask_t])
+        if seg_x and seg_y:
+            allx = np.concatenate(seg_x)
+            ally = np.concatenate(seg_y)
+            xmin = float(np.nanmin(allx))
+            xmax = float(np.nanmax(allx))
+            ymin = float(np.nanmin(ally))
+            ymax = float(np.nanmax(ally))
+            xc = 0.5 * (xmin + xmax)
+            yc = 0.5 * (ymin + ymax)
+            half = max(xmax - xmin, ymax - ymin) * 0.5
+            half = max(half, 1e-6) * 1.15
+            ax3.set_xlim(xc - half, xc + half)
+            ax3.set_ylim(yc - half, yc + half)
+        ax3.set_aspect("equal", adjustable="box")
+        ax3.set_xlabel("x_centroid - x_source (Einstein radii)")
+        ax3.set_ylabel("y_centroid - y_source (Einstein radii)")
+        ax3.set_title("Source-frame Centroid")
+        ax3.grid(True, alpha=0.3)
+        # Legends: place outside axes (above) to avoid covering data
+        ax2.legend(loc="upper center", bbox_to_anchor=(0.5, 1.18), ncol=2, frameon=False, fontsize=9)
+        ax3.legend(loc="upper center", bbox_to_anchor=(0.5, 1.18), ncol=2, frameon=False, fontsize=9)
+        
+        # Draw N/E arrows on the source-frame axes using the same rotation
+        if c_est is not None and s_est is not None:
+            n_dir = np.array([c_est, -s_est], dtype=float)
+            e_dir = np.array([s_est,  c_est], dtype=float)
+            def _safe_norm(v: np.ndarray) -> np.ndarray:
+                n = float(np.hypot(v[0], v[1]))
+                return v / n if n > 0 else v
+            n_dir = _safe_norm(n_dir)
+            e_dir = _safe_norm(e_dir)
+            # Use current axis limits
+            xlim = ax3.get_xlim(); ylim = ax3.get_ylim()
+            span_x = float(xlim[1] - xlim[0])
+            span_y = float(ylim[1] - ylim[0])
+            span = max(span_x, span_y)
+            arrow_len = 0.18 * span
+            padding = arrow_len + 0.03 * span
+            x0 = float(xlim[0] + padding)
+            y0 = float(ylim[1] - padding)
+            ax3.annotate("", xy=(x0 + e_dir[0]*arrow_len, y0 + e_dir[1]*arrow_len), xytext=(x0, y0),
+                         arrowprops=dict(arrowstyle="->", color="tab:green", linewidth=1.8), zorder=12)
+            ax3.text(x0 + e_dir[0]*arrow_len*1.05, y0 + e_dir[1]*arrow_len*1.05, "E",
+                     color="tab:green", fontsize=10, ha="center", va="center")
+            ax3.annotate("", xy=(x0 + n_dir[0]*arrow_len, y0 + n_dir[1]*arrow_len), xytext=(x0, y0),
+                         arrowprops=dict(arrowstyle="->", color="tab:blue", linewidth=1.8), zorder=12)
+            ax3.text(x0 + n_dir[0]*arrow_len*1.05, y0 + n_dir[1]*arrow_len*1.05, "N",
+                     color="tab:blue", fontsize=10, ha="center", va="center")
+    else:
+        ax3.axis("off")
+        ax3.text(
+            0.5,
+            0.5,
+            "Source position columns not available",
+            ha="center",
+            va="center",
+            transform=ax3.transAxes,
+            fontsize=9,
+        )
+
     lensframe_file = output_dir / f"{lc_file.stem}_lensframe_plot.png"
-    fig2.tight_layout()
+    # Reserve top margin for outside legends
+    fig2.tight_layout(rect=[0, 0, 1, 0.9])
     fig2.savefig(lensframe_file, dpi=150, bbox_inches="tight")
     plt.close(fig2)
+    # After saving, raise any deferred mismatches to fail the run while keeping plots for forensics
+    err_msgs: list[str] = []
+    if 'rotation_mismatch_msg' in locals() and rotation_mismatch_msg:
+        err_msgs.append(rotation_mismatch_msg)
+    if 'bagle_overlay_mismatch_msg' in locals() and bagle_overlay_mismatch_msg:
+        err_msgs.append(bagle_overlay_mismatch_msg)
+    if err_msgs:
+        raise SmokeTestError("; "+" ".join(err_msgs))
     return lensframe_file
 
 
@@ -378,7 +543,7 @@ def _render_astrometric_figure(
     time: np.ndarray,
     flux: np.ndarray,
     flux_err: np.ndarray,
-    true_flux: np.ndarray | None,
+    true_flux: np.ndarray,
     true_N_mas: np.ndarray,
     true_E_mas: np.ndarray,
     meas_N_mas: np.ndarray,
@@ -392,11 +557,19 @@ def _render_astrometric_figure(
     meas_ra_err_deg: np.ndarray,
     meas_dec_err_deg: np.ndarray,
     vector_specs: List[Dict[str, float | str]],
-    vbm_model: Dict[str, np.ndarray | str] | None,
-    true_x_vals: np.ndarray | None,
-    true_y_vals: np.ndarray | None,
-    meas_x: np.ndarray | None,
-    meas_y: np.ndarray | None,
+    vbm_model: Dict[str, np.ndarray | str],
+    true_x_vals: np.ndarray,
+    true_y_vals: np.ndarray,
+    meas_x: np.ndarray,
+    meas_y: np.ndarray,
+    src_x: np.ndarray,
+    src_y: np.ndarray,
+    pm_ref_alpha_float: float,
+    pm_ref_delta_float: float,
+    alpha_deg_float: float,
+    bagle_shift_E_mas: np.ndarray,
+    bagle_shift_N_mas: np.ndarray,
+    bagle_thetaE_mas: float,
 ) -> Tuple[Path, Path | None]:
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     fig.suptitle(title, fontsize=14)
@@ -416,17 +589,16 @@ def _render_astrometric_figure(
         label="Measured",
         zorder=1,
     )
-    if true_flux is not None:
-        ax_light.plot(
-            time,
-            true_flux,
-            "-",
-            linewidth=1.5,
-            color="red",
-            label="True",
-            zorder=2,
-            alpha=0.8,
-        )
+    ax_light.plot(
+        time,
+        true_flux,
+        "-",
+        linewidth=1.5,
+        color="red",
+        label="True",
+        zorder=2,
+        alpha=0.8,
+    )
     ax_light.axhline(
         1.0,
         color="k",
@@ -494,27 +666,28 @@ def _render_astrometric_figure(
         label="True samples",
         zorder=3,
     )
-    if vbm_model is not None:
-        deg_to_mas = 3600.0 * 1000.0
-        baseline_ra = true_ra_deg[0]
-        baseline_dec = true_dec_deg[0]
-        cos_dec0 = math.cos(math.radians(baseline_dec))
-        if abs(cos_dec0) < 1e-6:
-            cos_dec0 = 1e-6 if cos_dec0 >= 0 else -1e-6
 
-        vbm_ra_offset_mas = np.asarray(vbm_model["sky_ra"], dtype=float)  # type: ignore[index]
-        vbm_dec_offset_mas = np.asarray(vbm_model["sky_dec"], dtype=float)  # type: ignore[index]
-        vbm_ra_abs = baseline_ra + (vbm_ra_offset_mas / (deg_to_mas * cos_dec0))
-        vbm_dec_abs = baseline_dec + (vbm_dec_offset_mas / deg_to_mas)
+    # Overlay VBM model
+    deg_to_mas = 3600.0 * 1000.0
+    baseline_ra = true_ra_deg[0]
+    baseline_dec = true_dec_deg[0]
+    cos_dec0 = math.cos(math.radians(baseline_dec))
+    if abs(cos_dec0) < 1e-6:
+        cos_dec0 = 1e-6 if cos_dec0 >= 0 else -1e-6
 
-        ax_radec.plot(
-            vbm_ra_abs,
-            vbm_dec_abs,
-            color="tab:purple",
-            linewidth=1.2,
-            alpha=0.9,
-            label=vbm_model.get("sky_label", "VBM BinaryAstroLightCurve (sky)"),
-        )
+    vbm_ra_offset_mas = np.asarray(vbm_model["sky_ra"], dtype=float)  # type: ignore[index]
+    vbm_dec_offset_mas = np.asarray(vbm_model["sky_dec"], dtype=float)  # type: ignore[index]
+    vbm_ra_abs = baseline_ra + (vbm_ra_offset_mas / (deg_to_mas * cos_dec0))
+    vbm_dec_abs = baseline_dec + (vbm_dec_offset_mas / deg_to_mas)
+
+    ax_radec.plot(
+        vbm_ra_abs,
+        vbm_dec_abs,
+        color="tab:purple",
+        linewidth=1.2,
+        alpha=0.9,
+        label=vbm_model.get("sky_label", "VBM BinaryAstroLightCurve (sky)"),
+    )
 
     ax_radec.set_xlabel("RA (degrees)")
     ax_radec.set_ylabel("Dec (degrees)")
@@ -522,27 +695,27 @@ def _render_astrometric_figure(
     ax_radec.grid(True, alpha=0.3)
     ax_radec.axis("equal")
 
-    if span_years and vector_specs:
-        start_ra = true_ra_deg[0]
-        start_dec = true_dec_deg[0]
-        cos_dec = math.cos(math.radians(start_dec))
-        if abs(cos_dec) < 1e-6:
-            cos_dec = 1e-6 if cos_dec >= 0 else -1e-6
-        for spec in vector_specs:
-            pm_ra = spec["pm_ra"]
-            pm_dec = spec["pm_dec"]
-            delta_ra_deg = (pm_ra * span_years) / (3600000.0 * cos_dec)
-            delta_dec_deg = (pm_dec * span_years) / 3600000.0
-            end_ra = start_ra + delta_ra_deg
-            end_dec = start_dec + delta_dec_deg
-            ax_radec.annotate(
-                "",
-                xy=(end_ra, end_dec),
-                xytext=(start_ra, start_dec),
-                arrowprops=dict(color=spec["color"], arrowstyle="->", linewidth=1),
-                zorder=5,
-            )
-            ax_radec.plot([], [], color=spec["color"], linewidth=2, label=spec["label"])
+    start_ra = true_ra_deg[0]
+    start_dec = true_dec_deg[0]
+    cos_dec = math.cos(math.radians(start_dec))
+    if abs(cos_dec) < 1e-6:
+        cos_dec = 1e-6 if cos_dec >= 0 else -1e-6
+    for spec in vector_specs:
+        pm_ra = spec["pm_ra"]
+        pm_dec = spec["pm_dec"]
+        delta_ra_deg = (pm_ra * span_years) / (3600000.0 * cos_dec)
+        delta_dec_deg = (pm_dec * span_years) / 3600000.0
+        end_ra = start_ra + delta_ra_deg
+        end_dec = start_dec + delta_dec_deg
+        ax_radec.annotate(
+            "",
+            xy=(end_ra, end_dec),
+            xytext=(start_ra, start_dec),
+            arrowprops=dict(color=spec["color"], arrowstyle="->", linewidth=1),
+            zorder=5,
+        )
+        ax_radec.plot([], [], color=spec["color"], linewidth=2, label=spec["label"])
+    
     ax_radec.legend(ncol=2, fontsize=8)
 
     ax_ne.plot(
@@ -589,17 +762,18 @@ def _render_astrometric_figure(
         label="Measured",
         zorder=1,
     )
-    if vbm_model is not None:
-        vbm_E_mas = np.asarray(vbm_model["sky_ra"], dtype=float)  # type: ignore[index]
-        vbm_N_mas = np.asarray(vbm_model["sky_dec"], dtype=float)  # type: ignore[index]
-        ax_ne.plot(
-            vbm_E_mas,
-            vbm_N_mas,
-            color="tab:purple",
-            linewidth=1.2,
-            alpha=0.9,
-            label=vbm_model.get("sky_label", "VBM BinaryAstroLightCurve (sky)"),
-        )
+
+    # Overlay VBM model
+    vbm_E_mas = np.asarray(vbm_model["sky_ra"], dtype=float)  # type: ignore[index]
+    vbm_N_mas = np.asarray(vbm_model["sky_dec"], dtype=float)  # type: ignore[index]
+    ax_ne.plot(
+        vbm_E_mas,
+        vbm_N_mas,
+        color="tab:purple",
+        linewidth=1.2,
+        alpha=0.9,
+        label=vbm_model.get("sky_label", "VBM BinaryAstroLightCurve (sky)"),
+    )
     ax_ne.set_xlabel("ΔEast (mas)")
     ax_ne.set_ylabel("ΔNorth (mas)")
     ax_ne.set_title("Astrometric Centroid (N/E), Relative to the Lens")
@@ -645,44 +819,56 @@ def _render_astrometric_figure(
     fig.savefig(plot_file, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-    lensframe_path: Path | None = None
-    if vbm_model is not None:
-        lensframe_path = _render_lensframe(
-            lc_file,
-            output_dir,
-            time,
-            cmap,
-            norm,
-            vbm_model,
-            true_x_vals,
-            true_y_vals,
-            meas_x,
-            meas_y,
-        )
+    lensframe_path: Path
+    lensframe_path = _render_lensframe(
+        lc_file,
+        output_dir,
+        time,
+        cmap,
+        norm,
+        vbm_model,
+        true_x_vals,
+        true_y_vals,
+        meas_x,
+        meas_y,
+        src_x,
+        src_y,
+        pm_ref_alpha_float=pm_ref_alpha_float,
+        pm_ref_delta_float=pm_ref_delta_float,
+        alpha_deg_float=alpha_deg_float,
+        true_E_mas=true_E_mas,
+        true_N_mas=true_N_mas,
+        bagle_shift_E_mas=bagle_shift_E_mas,
+        bagle_shift_N_mas=bagle_shift_N_mas,
+        bagle_thetaE_mas=bagle_thetaE_mas,
+    )
 
     return plot_file, lensframe_path
 
 
 def plot_lightcurves(
     output_dir: Path,
-    summaries: Dict[Tuple[int, int, int], Dict[str, float]] | None = None,
-    params: Dict[str, str] | None = None,
+    summaries: Dict[Tuple[int, int, int], Dict[str, float]],
+    params: Dict[str, str],
 ) -> None:
     lc_files = sorted(output_dir.rglob("*.lc"))
     if not lc_files:
         return
 
     sim_zero_offset = 0.0
-    if params:
-        sz = params.get("SIMULATION_ZERO_TIME")
-        if sz:
-            sim_zero_offset = float(sz) - 2450000.0
+    sz = params.get("SIMULATION_ZERO_TIME")
+    if sz:
+        sim_zero_offset = float(sz) - 2450000.0
 
     astrometry_expected = False
-    if params:
-        val = params.get("ASTROMETRY_ON")
-        if val is not None:
-            astrometry_expected = str(val).strip().lower() not in {"0", "false", "off"}
+    val = params.get("ASTROMETRY_ON")
+    if val is not None:
+        astrometry_expected = str(val).strip().lower() not in {"0", "false", "off"}
+
+    validate_bagle_flag = False
+    vb = params.get("VALIDATE_BAGLE")
+    if vb is not None and str(vb).strip().lower() not in {"", "0", "false", "off", "none"}:
+        validate_bagle_flag = True
 
     for lc_file in lc_files:
         df, meta = read_gulls_lightcurve(lc_file)
@@ -703,60 +889,45 @@ def plot_lightcurves(
                 return None
             return df[name].to_numpy(dtype=float, copy=False)
 
-        summary = None
-        if summaries:
-            event_key = _derive_event_key(lc_file)
-            if event_key is not None:
-                summary = summaries.get(event_key)
+        event_key = derive_event_key(lc_file)
+        summary = summaries.get(event_key)
         if summary is None:
             raise SmokeTestError(f"Smoke test failed: summary metrics missing for {lc_file.name}")
 
         title = f"Smoke Test: {lc_file.stem}"
-        theta_e_float: float | None = None
-        alpha_deg_float: float | None = None
-        pi_n_float: float | None = None
-        pi_e_float: float | None = None
-        source_dist_float: float | None = None
-        event_ra_float: float | None = None
-        event_dec_float: float | None = None
-        if summary:
-            lens_mass = _format_metric(summary.get("lens_mass"))
-            lens_dist = _format_metric(summary.get("lens_dist"))
-            source_dist = _format_metric(summary.get("source_dist"))
-            theta_e = _format_metric(summary.get("theta_e"))
-            pm_alpha = _format_metric(summary.get("pm_helio_alpha"))
-            pm_delta = _format_metric(summary.get("pm_helio_delta"))
-            subtitle = (
-                f"Lens M={lens_mass} Msun, Lens D={lens_dist} pc, "
-                f"Source D={source_dist} pc, theta_E={theta_e}, "
-                f"mu_rel=({pm_alpha}, {pm_delta}) mas/yr"
-            )
-            title = f"{title}\n{subtitle}"
-            val = summary.get("theta_e")
-            if val is not None and not math.isnan(val):
-                theta_e_float = float(val)
-            val = summary.get("alpha_event")
-            if val is not None and not math.isnan(val):
-                alpha_deg_float = float(val)
-            val = summary.get("pi_n")
-            if val is not None and not math.isnan(val):
-                pi_n_float = float(val)
-            val = summary.get("pi_e")
-            if val is not None and not math.isnan(val):
-                pi_e_float = float(val)
-            val = summary.get("source_dist")
-            if val is not None and not math.isnan(val) and val > 0:
-                source_dist_float = float(val)
-            val = summary.get("event_ra")
-            if val is not None and not math.isnan(val):
-                event_ra_float = float(val)
-            val = summary.get("event_dec")
-            if val is not None and not math.isnan(val):
-                event_dec_float = float(val)
-        if alpha_deg_float is None and event_vals and len(event_vals) >= 2:
-            alpha_deg_float = float(event_vals[1])
-        if alpha_deg_float is None:
-            raise SmokeTestError(f"Smoke test failed: missing alpha_event for {lc_file.name}")
+
+        # Strict extractors for required values (fail-fast)
+        def _require_summary(key: str, label: str, *, positive: bool = False) -> float:
+            v = summary.get(key)
+            if v is None or math.isnan(v):
+                raise SmokeTestError(
+                    f"Smoke test failed: missing or non-finite {label} for {lc_file.name}"
+                )
+            fv = float(v)
+            if positive:
+                if not (np.isfinite(fv) and fv > 0):
+                    raise SmokeTestError(
+                        f"Smoke test failed: {label} must be positive and finite for {lc_file.name}"
+                    )
+            return fv
+
+        theta_e_float = _require_summary("theta_e", "theta_E")
+        alpha_deg_float = _require_summary("alpha_event", "alpha_event")
+        source_dist_float = _require_summary("source_dist", "source distance (pc)", positive=True)
+        event_ra_float = _require_summary("event_ra", "event RA (deg)")
+        event_dec_float = _require_summary("event_dec", "event Dec (deg)")
+
+        # Also require geocentric relative PM now (used in subtitle and vectors)
+        pm_ref_alpha_float = _require_summary("pm_ref_alpha", "pm_ref_alpha (mas/yr)")
+        pm_ref_delta_float = _require_summary("pm_ref_delta", "pm_ref_delta (mas/yr)")
+
+        # Build a strict subtitle using only required values
+        subtitle = (
+            f"theta_E={theta_e_float:.6f}, "
+            f"Source D={source_dist_float:.3f} pc, "
+            f"mu_ref=({pm_ref_alpha_float:.3f}, {pm_ref_delta_float:.3f}) mas/yr"
+        )
+        title = f"{title}\n{subtitle}"
 
         time = _require_column("Simulation_time")
         flux = _require_column("measured_relative_flux")
@@ -805,51 +976,77 @@ def plot_lightcurves(
         meas_dec_deg = _require_column("measured_centroid_dec_deg")
         meas_ra_err_deg = _require_column("measured_centroid_ra_error_deg")
         meas_dec_err_deg = _require_column("measured_centroid_dec_error_deg")
-        true_x_vals = _optional_column("true_x_centroid")
-        true_y_vals = _optional_column("true_y_centroid")
-        meas_x = _optional_column("x_centroid")
-        meas_y = _optional_column("y_centroid")
+        true_x_vals = _require_column("true_x_centroid")
+        true_y_vals = _require_column("true_y_centroid")
+        meas_x = _require_column("x_centroid")
+        meas_y = _require_column("y_centroid")
+        src_x = _require_column("source_x")
+        src_y = _require_column("source_y")
 
-        pm_ref_alpha_float = None
-        pm_ref_delta_float = None
-        pm_ref_alpha_val = summary.get("pm_ref_alpha")
-        pm_ref_delta_val = summary.get("pm_ref_delta")
-        if pm_ref_alpha_val is not None and pm_ref_delta_val is not None:
-            pm_ref_alpha_float = float(pm_ref_alpha_val)
-            pm_ref_delta_float = float(pm_ref_delta_val)
-            if math.isnan(pm_ref_alpha_float) or math.isnan(pm_ref_delta_float):
-                pm_ref_alpha_float = None
-                pm_ref_delta_float = None
+        # Optional: load BAGLE sidecar ONLY when --validate-bagle was used; if present it must be consistent.
+        bagle_shift_E: np.ndarray | None = None
+        bagle_shift_N: np.ndarray | None = None
+        bagle_thetaE: float | None = None
+        if validate_bagle_flag:
+            sidecar_path = lc_file.parent / f"{lc_file.stem}_bagle.npz"
+            if sidecar_path.exists():
+                z = np.load(sidecar_path)
+                required_keys = {"bagle_shift_E_mas", "bagle_shift_N_mas", "thetaE_mas"}
+                missing = [k for k in required_keys if k not in z]
+                if missing:
+                    raise SmokeTestError(f"BAGLE sidecar {sidecar_path.name} missing keys: {', '.join(missing)}")
+                # BAGLE explicitly returns centroid shifts as (East, North). The sidecar stores keys with that ordering.
+                # Accept alias keys for backwards compatibility if present.
+                if "bagle_shift_E_mas" in z and "bagle_shift_N_mas" in z:
+                    bagle_shift_E = np.asarray(z["bagle_shift_E_mas"], dtype=float)
+                    bagle_shift_N = np.asarray(z["bagle_shift_N_mas"], dtype=float)
+                else:
+                    # Fallback: accept older alias names 'shift_E'/'shift_N'
+                    bagle_shift_E = np.asarray(z.get("shift_E", []), dtype=float)
+                    bagle_shift_N = np.asarray(z.get("shift_N", []), dtype=float)
+                bagle_thetaE = float(np.asarray(z["thetaE_mas"]).reshape(-1)[0])
+                if not np.isfinite(bagle_thetaE) or bagle_thetaE <= 0:
+                    raise SmokeTestError(f"BAGLE sidecar thetaE_mas must be positive and finite; got {bagle_thetaE}")
 
-        source_pm_icrs: Tuple[float, float] | None = None
+        # pm_ref_alpha_float / pm_ref_delta_float already required above
+
+        # Strictly require source PM in Galactic coords, convert to ICRS
+        src_vals = (
+            summary.get("source_mul"),
+            summary.get("source_mub"),
+            summary.get("source_l"),
+            summary.get("source_b"),
+        )
+        if not all(v is not None and not math.isnan(v) for v in src_vals):
+            raise SmokeTestError(
+                f"Smoke test failed: missing source proper motion (mul/mub) or l/b in summary for {lc_file.name}"
+            )
+        source_pm_icrs: Tuple[float, float] = galactic_pm_to_icrs(
+            float(src_vals[2]),
+            float(src_vals[3]),
+            float(src_vals[0]),
+            float(src_vals[1]),
+        )
+
+        # Lens PM vectors: if any lens PM fields are present, require all and be finite; else omit cleanly.
         lens_pm_icrs: Tuple[float, float] | None = None
-        if summary:
-            src_vals = (
-                summary.get("source_mul"),
-                summary.get("source_mub"),
-                summary.get("source_l"),
-                summary.get("source_b"),
-            )
-            if all(v is not None and not math.isnan(v) for v in src_vals):
-                source_pm_icrs = _galactic_pm_to_icrs(
-                    float(src_vals[2]),
-                    float(src_vals[3]),
-                    float(src_vals[0]),
-                    float(src_vals[1]),
+        lens_vals = (
+            summary.get("lens_mul"),
+            summary.get("lens_mub"),
+            summary.get("lens_l"),
+            summary.get("lens_b"),
+        )
+        if any(v is not None for v in lens_vals):
+            if not all(v is not None and not math.isnan(v) for v in lens_vals):
+                raise SmokeTestError(
+                    f"Smoke test failed: lens proper motion/l,b present but incomplete/non-finite for {lc_file.name}"
                 )
-            lens_vals = (
-                summary.get("lens_mul"),
-                summary.get("lens_mub"),
-                summary.get("lens_l"),
-                summary.get("lens_b"),
+            lens_pm_icrs = galactic_pm_to_icrs(
+                float(lens_vals[2]),
+                float(lens_vals[3]),
+                float(lens_vals[0]),
+                float(lens_vals[1]),
             )
-            if all(v is not None and not math.isnan(v) for v in lens_vals):
-                lens_pm_icrs = _galactic_pm_to_icrs(
-                    float(lens_vals[2]),
-                    float(lens_vals[3]),
-                    float(lens_vals[0]),
-                    float(lens_vals[1]),
-                )
 
         span_years = None
         if len(time):
@@ -887,27 +1084,28 @@ def plot_lightcurves(
                     }
                 )
 
-        vbm_model, vbm_reason = _compute_vbm_model(
+        # Fail fast if required headers are missing
+        if planet_vals is None:
+            raise SmokeTestError(f"Smoke test failed: #Planet header missing for {lc_file.name}")
+        if event_vals is None:
+            raise SmokeTestError(f"Smoke test failed: #Event header missing for {lc_file.name}")
+
+        vbm_model = compute_vbm_model(
             summary,
             planet_vals,
             event_vals,
             source_pm_icrs,
             lens_pm_icrs,
-            theta_e_float,
-            source_dist_float,
-            event_ra_float,
-            event_dec_float,
-            alpha_deg_float,
-            sim_zero_offset,
+            float(theta_e_float) if theta_e_float is not None else float("nan"),
+            float(source_dist_float) if source_dist_float is not None else float("nan"),
+            float(event_ra_float) if event_ra_float is not None else float("nan"),
+            float(event_dec_float) if event_dec_float is not None else float("nan"),
+            float(alpha_deg_float),
+            float(sim_zero_offset),
             time,
             true_x_vals,
             true_y_vals,
         )
-        if astrometry_expected and vbm_model is None:
-            detail = f" ({vbm_reason})" if vbm_reason else ""
-            raise SmokeTestError(
-                f"Smoke test failed: missing VBM lens-frame plot for {lc_file.name}{detail}"
-            )
 
         plot_file, lensframe_path = _render_astrometric_figure(
             lc_file,
@@ -935,6 +1133,14 @@ def plot_lightcurves(
             true_y_vals,
             meas_x,
             meas_y,
+            src_x,
+            src_y,
+            pm_ref_alpha_float,
+            pm_ref_delta_float,
+            alpha_deg_float,
+            bagle_shift_E,
+            bagle_shift_N,
+            bagle_thetaE,
         )
 
         if astrometry_expected:

@@ -265,11 +265,17 @@ void outputLightcurve(struct event *Event, struct obsfilekeywords World[], struc
     }
   fprintf(lcfile_ptr,"%s\n",data.str().c_str());
 
-  //Microlensing data
+  //Microlensing data (#Event header): print with fixed 6 decimal places for consistency
   data.str(""); data << "#Event: ";
-  data << Event->u0 << " " << Event->alpha << " " << setprecision(12)
-       << Event->t0 << " " << Event->tcroin << " " << setprecision(6) << " "
-       << Event->ucroin << " " << Event->rcroin << " " << Event->tE_r << " " << Event->rs;
+  data << fixed << setprecision(6)
+    << Event->u0 << " "
+    << Event->alpha << " "
+    << Event->t0 << " "
+    << Event->tcroin << " "
+    << Event->ucroin << " "
+    << Event->rcroin << " "
+    << Event->tE_r << " "
+    << Event->rs;
   fprintf(lcfile_ptr,"%s\n",data.str().c_str());
 
   //Observatory groups
@@ -296,7 +302,7 @@ void outputLightcurve(struct event *Event, struct obsfilekeywords World[], struc
       "Simulation_time", "measured_relative_flux", "measured_relative_flux_error",
       "true_relative_flux",  "true_relative_flux_error",    "observatory_code",
       "saturation_flag",     "best_single_lens_fit",
-      "true_x_centroid", "true_y_centroid",
+      "true_x_centroid", "true_y_centroid", "x_centroid", "y_centroid",
       "true_N_centroid_mas", "true_E_centroid_mas",
       "measured_N_centroid_mas",  "measured_E_centroid_mas",
       "measured_N_centroid_error_mas", "measured_E_centroid_error_mas",
@@ -356,16 +362,18 @@ void outputLightcurve(struct event *Event, struct obsfilekeywords World[], struc
 
   if(lcfile_ptr!=NULL && fileOpen==1)
     {
-      // Precompute lens proper motion in Equatorial frame (mas/yr)
+      // Proper motion used for absolute RA/Dec drift (mas/yr): LENS heliocentric PM.
+      // Justification: cNtrue/cEtrue are centroid offsets in the lens frame (relative to the lens origin),
+      // so absolute RA/Dec = [Lens position(t)] + [centroid offset(t) mapped to NE]. The Lens position(t)
+      // carries the lens PM (and, ideally, parallax which we will add in a follow-up change).
       int ln_pm = ln; // lens index already determined above
       double mul = 0.0, mub = 0.0;
       if (ln_pm >= 0 && ln_pm < (int)Lenses->data.size()) {
-        // Guard against missing columns by checking datadict where possible
         mul = Lenses->data[ln_pm][Lenses->MUL];
         mub = Lenses->data[ln_pm][Lenses->MUB];
       }
       coords cconv;
-      double muRA_masyr = 0.0, muDec_masyr = 0.0; // East, North components
+      double muRA_masyr = 0.0, muDec_masyr = 0.0; // East, North components (ICRS)
       cconv.mulb2ad(Event->l, Event->b, mul, mub, &muRA_masyr, &muDec_masyr);
       const double deg_per_mas = 1.0 / 3600000.0; // degrees per mas
       const double days_per_year = 365.25;
@@ -377,13 +385,47 @@ void outputLightcurve(struct event *Event, struct obsfilekeywords World[], struc
 		obsidx=Event->obsidx[i];
 	  shiftedidx = i-Event->nepochsvec[obsidx];
 
-    // Absolute RA/Dec of centroid: baseline (RA,Dec) + PM drift + microlensing NE offset
+  // Compute lens/source flux ratio in current filter for blended lens-frame centroid (relative units)
+  int filt_idx = World[obsidx].filter;
+  double m_src0 = Sources->mags[sn][filt_idx];
+  double m_lns0 = Lenses->mags[ln][filt_idx];
+  double R_lens_rel0 = pow(10.0, -0.4 * (m_lns0 - m_src0));
+  double F_src_tot_rel0 = Event->Atrue[i];
+  double f_blend0 = F_src_tot_rel0 / (F_src_tot_rel0 + R_lens_rel0);
+  // Blended NE centroid in mas (lens at origin -> lens contribution is 0 in NE)
+  double cN_blend_mas = f_blend0 * Event->cNtrue[i];
+  double cE_blend_mas = f_blend0 * Event->cEtrue[i];
+
+  // Absolute RA/Dec of centroid: baseline (RA,Dec) + PM drift + microlensing NE offset + lens annual parallax
     double dt_years = (Event->epoch[i] - Event->t0) / days_per_year;
-    // NE offsets including PM (mas)
-    double dN_true_mas = Event->cNtrue[i] + muDec_masyr * dt_years;
-    double dE_true_mas = Event->cEtrue[i] + muRA_masyr * dt_years;
-    double dN_obs_mas  = Event->cNobs[i]  + muDec_masyr * dt_years;
-    double dE_obs_mas  = Event->cEobs[i]  + muRA_masyr * dt_years;
+  // NE offsets including lens PM (mas), using blended centroid for absolute position
+  double dN_true_mas = cN_blend_mas + muDec_masyr * dt_years;
+  double dE_true_mas = cE_blend_mas + muRA_masyr * dt_years;
+  double dN_obs_mas  = cN_blend_mas + muDec_masyr * dt_years;
+  double dE_obs_mas  = cE_blend_mas + muRA_masyr * dt_years;
+
+  // Add lens annual parallax shift in NE (mas): pi_L(mas) * (observer NE displacement in AU)
+  // Lenses->data[ln][DIST] is in kpc; pi_L_mas = 1 / D_kpc
+  double piL_mas = 0.0;
+  if (ln_pm >= 0 && ln_pm < (int)Lenses->data.size()) {
+    double D_kpc = Lenses->data[ln_pm][Lenses->DIST];
+    if (D_kpc > 0) piL_mas = 1.0 / D_kpc;
+  }
+  // Parallax NE components (AU) from parallax module, relative to reference frame
+  double Npar_AU = 0.0, Epar_AU = 0.0;
+  if (obsidx >= 0 && obsidx < Paramfile->numobservatories) {
+    int idx = shiftedidx;
+    if (idx >= 0 && idx < (int)Event->pllx[obsidx].Nshift.size()) {
+      Npar_AU = Event->pllx[obsidx].Nshift[idx];
+    }
+    if (idx >= 0 && idx < (int)Event->pllx[obsidx].Eshift.size()) {
+      Epar_AU = Event->pllx[obsidx].Eshift[idx];
+    }
+  }
+  dN_true_mas += piL_mas * Npar_AU;
+  dE_true_mas += piL_mas * Epar_AU;
+  dN_obs_mas  += piL_mas * Npar_AU;
+  dE_obs_mas  += piL_mas * Epar_AU;
     // Convert to degrees (small-angle approx; RA scaled by cos(dec))
     double ra_true_deg = 0.0, dec_true_deg = 0.0, ra_obs_deg = 0.0, dec_obs_deg = 0.0;
     double ra_err_deg = 0.0, dec_err_deg = 0.0;
@@ -406,20 +448,20 @@ void outputLightcurve(struct event *Event, struct obsfilekeywords World[], struc
     if (ra_obs_deg < 0.0)     ra_obs_deg  += 360.0;
   }
 	  
-        fprintf(lcfile_ptr,
-    "%.12g %.8g %g %.12g %g %d %d "
-    "%.8g %.8g %.8g "
-    "%.8g %.8g %.8g %.8g %.8g %.8g "
-    "%.12f %.12f %.12f %.12f %.12f %.12f "
-    "%.6g %.6g %16.7f "
-    "%.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g "
-    "%.6g %.6g %.6g ",
+    fprintf(lcfile_ptr,
+  "%.12g %.8g %.8g %.12g %.8g %d %d %.8g "
+  "%.8g %.8g %.8g %.8g "
+  "%.8g %.8g %.8g %.8g %.8g %.8g "
+  "%.12f %.12f %.12f %.12f %.12f %.12f "
+  "%.6g %.6g %16.7f "
+  "%.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g "
+  "%.6g %.6g %.6g ",
   Event->epoch[i], Event->Aobs[i], Event->Aerr[i],
   Event->Atrue[i], Event->Atrueerr[i], obsidx,
   (Event->nosat[i]?0:1), Event->Afit[i],
-  Event->xctrue[i], Event->yctrue[i],
+  Event->xctrue[i], Event->yctrue[i], f_blend0*Event->xctrue[i], f_blend0*Event->yctrue[i],
   Event->cNtrue[i], Event->cEtrue[i],
-  Event->cNobs[i], Event->cEobs[i],
+  cN_blend_mas, cE_blend_mas,
   Event->cNobserr[i], Event->cEobserr[i],
   ra_true_deg, dec_true_deg,
   ra_obs_deg,  dec_obs_deg,

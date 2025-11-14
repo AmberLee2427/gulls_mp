@@ -1,4 +1,10 @@
-"""Command-line entry point for the gulls smoke test."""
+"""Command-line entry point for the gulls smoke test.
+
+Brittle-by-design policy (revised):
+- Warnings are NOT escalated to errors (we want BAGLE receipts like FSBL→PSBL fallback to surface).
+- NumPy floating-point errors still raise immediately (divide/invalid/overflow/underflow).
+- Do not add permissive try/except around core physics or transforms; fail fast on real errors.
+"""
 from __future__ import annotations
 
 import argparse
@@ -8,6 +14,10 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
+import warnings
+
+import numpy as np
+import pandas as pd
 
 from .constants import (
     BUILD_BIN_DEFAULT,
@@ -218,6 +228,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     _prepare_environment(args.keep_output, prepared_cases)
 
+    # Enforce brittleness globally for the entire smoke test process.
+    # Let warnings through (e.g., BAGLE FSBL→PSBL receipt), but keep FP errors fatal.
+    warnings.resetwarnings()
+    warnings.filterwarnings("default")
+    np.seterr(all="raise")
+    # Raise on pandas chained assignment and treat its warnings as errors too
+    pd.options.mode.chained_assignment = "raise"
+
     failures: List[str] = []
 
     for case in prepared_cases:
@@ -240,6 +258,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         out_files = verify_outputs(case.output_dir)
         verify_catalog_alignment(out_files, case.params)
         summaries = gather_case_metrics(out_files)
+        # Propagate BAGLE validation intent to plotting to gate sidecar overlays
+        if args.validate_bagle:
+            case.params["VALIDATE_BAGLE"] = "1"
         plot_lightcurves(case.output_dir, summaries, case.params)
         
         # BAGLE physics validation (optional)
@@ -267,17 +288,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                 base_name = out_file.stem  # e.g., "smoke_std_0_0"
                 # Pattern matches smoke_std_0_0_0.all.lc, smoke_std_0_0_1.all.lc, etc.
                 for lc_file in case.output_dir.glob(f"{base_name}_*.all.lc"):
-                    result = validate_event(
-                        out_file, lc_file, simulation_zero_time,
-                        multiple_sources, params_dict=case.params, verbose=True
-                    )
-                    if result:
-                        validation_count += 1
+                    try:
+                        result = validate_event(
+                            out_file, lc_file, simulation_zero_time,
+                            multiple_sources, params_dict=case.params, verbose=True
+                        )
+                        if result:
+                            validation_count += 1
+                    except Exception as e:
+                        failures.append(f"{case.label} BAGLE validation failed for {lc_file.name}: {e}")
+                        # Continue to allow sidecar overlays to be plotted for diagnostics
+                        continue
 
             if validation_count == 0:
                 print("  No events validated")
             else:
                 print(f"  Validated {validation_count} binary lens events against BAGLE")
+
+            # Re-render plots to include BAGLE overlays saved as sidecars during validation
+            try:
+                # Ensure plotting knows overlays are expected if validation is enabled
+                if args.validate_bagle:
+                    case.params["VALIDATE_BAGLE"] = "1"
+                plot_lightcurves(case.output_dir, summaries, case.params)
+                print("  Regenerated plots with BAGLE overlays (if sidecars present)")
+            except Exception as _plot_ex:
+                failures.append(f"{case.label} plotting after BAGLE validation failed: {_plot_ex}")
 
     if failures:
         print("\nSmoke test failed:")

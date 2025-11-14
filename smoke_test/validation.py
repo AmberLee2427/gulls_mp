@@ -12,9 +12,15 @@ from .constants import CATALOG_ABS_TOL, CATALOG_REL_TOL, REPO_ROOT
 from .errors import SmokeTestError
 
 
-_CANONICAL_PSF_HASHES: Dict[str, str] = {
+_CANONICAL_PSF_HASHES: Dict[str, Tuple[str, ...]] = {
     # Canonical Roman-like PSF used by smoke tests (Nkern=145, Nsub=9, pixscale=0.11)
-    "smoke_test/assets/observatories/WFI_PSF.psf": "ea9c8b2a2d3b0687487f8283661fd491fad492bb5e012776b8cf17324d65222b",
+    # Allow both the published canonical binary and the deterministically-generated PSF.
+    #  - canonical: ea9c8b2a2d3b0687487f8283661fd491fad492bb5e012776b8cf17324d65222b
+    #  - generated: 9a6193415edfc69954e34fa91435be6feec02cea0f3761fd2195e42cecca7c16
+    "smoke_test/assets/observatories/WFI_PSF.psf": (
+        "ea9c8b2a2d3b0687487f8283661fd491fad492bb5e012776b8cf17324d65222b",
+        "9a6193415edfc69954e34fa91435be6feec02cea0f3761fd2195e42cecca7c16",
+    ),
 }
 
 
@@ -909,12 +915,12 @@ def verify_psf_files(params: Dict[str, str]) -> None:
             rel_path = psf_path.relative_to(REPO_ROOT).as_posix()
         except ValueError:
             rel_path = psf_path.as_posix()
-        expected_hash = _CANONICAL_PSF_HASHES.get(rel_path)
-        if expected_hash:
+        expected_hashes = _CANONICAL_PSF_HASHES.get(rel_path)
+        if expected_hashes:
             digest = hashlib.sha256(psf_bytes).hexdigest()
-            if digest != expected_hash:
+            if digest not in expected_hashes:
                 warnings.warn(
-                    f"PSF file {psf_path} does not match the canonical SHA256 ({expected_hash}); "
+                    f"PSF file {psf_path} does not match any allowed SHA256 {expected_hashes}; "
                     "continuing because header metadata matches detector configuration."
                 )
 
