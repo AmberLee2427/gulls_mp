@@ -302,11 +302,13 @@ void outputLightcurve(struct event *Event, struct obsfilekeywords World[], struc
       "Simulation_time", "measured_relative_flux", "measured_relative_flux_error",
       "true_relative_flux",  "true_relative_flux_error",    "observatory_code",
       "saturation_flag",     "best_single_lens_fit",
-      "true_x_centroid", "true_y_centroid", "x_centroid", "y_centroid",
-      "true_N_centroid_mas", "true_E_centroid_mas",
+      "centroid_x_lens1", "centroid_y_lens1",
+      "centroid_x_source1", "centroid_y_source1",
+      "centroid_N_source1_mas", "centroid_E_source1_mas",
+      "centroid_N_sky_mas", "centroid_E_sky_mas",
       "measured_N_centroid_mas",  "measured_E_centroid_mas",
       "measured_N_centroid_error_mas", "measured_E_centroid_error_mas",
-      "true_centroid_ra_deg", "true_centroid_dec_deg",
+      "centroid_RA_deg", "centroid_Dec_deg",
       "measured_centroid_ra_deg", "measured_centroid_dec_deg",
       "measured_centroid_ra_error_deg", "measured_centroid_dec_error_deg",
       "parallax_shift_t",
@@ -379,6 +381,33 @@ void outputLightcurve(struct event *Event, struct obsfilekeywords World[], struc
       const double days_per_year = 365.25;
       const double dec0 = Event->dec; // radians
       const double cosdec = cos(dec0);
+      double cosPos = 1.0;
+      double sinPos = 0.0;
+      {
+        const double alpha_rad = Event->alpha * TO_RAD;
+        const double dPosAng = 0.0;
+        const double piE_norm = hypot(Event->piEN, Event->piEE);
+        const bool parallax_on = (Paramfile->pllxMultiplyer && piE_norm > 1e-12);
+        double posAng = 0.0;
+        if (parallax_on) {
+          const double phi_pi = atan2(Event->piEE, Event->piEN); // atan2(East, North)
+          posAng = phi_pi + alpha_rad + dPosAng;
+        } else {
+          coords rotconv;
+          double mua = 0.0, mud = 0.0;
+          rotconv.mulb2ad(Event->l, Event->b, Event->murel_l, Event->murel_b, &mua, &mud);
+          const double mu_norm = hypot(mua, mud);
+          if (mu_norm > 1e-16) {
+            const double phi_mu = atan2(mua, mud);
+            posAng = phi_mu + alpha_rad + dPosAng;
+          } else {
+            posAng = 0.0;
+          }
+        }
+        cosPos = cos(posAng);
+        sinPos = sin(posAng);
+      }
+      const double thetaE_mas = Event->thE;
 
       for(i=0;i<Event->nepochs;i++)
         {
@@ -392,17 +421,22 @@ void outputLightcurve(struct event *Event, struct obsfilekeywords World[], struc
   double R_lens_rel0 = pow(10.0, -0.4 * (m_lns0 - m_src0));
   double F_src_tot_rel0 = Event->Atrue[i];
   double f_blend0 = F_src_tot_rel0 / (F_src_tot_rel0 + R_lens_rel0);
-  // Blended NE centroid in mas (lens at origin -> lens contribution is 0 in NE)
-  double cN_blend_mas = f_blend0 * Event->cNtrue[i];
-  double cE_blend_mas = f_blend0 * Event->cEtrue[i];
+  double centroid_x_lens1 = Event->xctrue[i];
+  double centroid_y_lens1 = Event->yctrue[i];
+  double centroid_x_source1 = centroid_x_lens1 - Event->xs[i];
+  double centroid_y_source1 = centroid_y_lens1 - Event->ys[i];
+  double centroid_x_source1_mas = centroid_x_source1 * thetaE_mas;
+  double centroid_y_source1_mas = centroid_y_source1 * thetaE_mas;
+  double centroid_N_source1_mas = centroid_x_source1_mas * cosPos - centroid_y_source1_mas * sinPos;
+  double centroid_E_source1_mas = centroid_x_source1_mas * sinPos + centroid_y_source1_mas * cosPos;
 
   // Absolute RA/Dec of centroid: baseline (RA,Dec) + PM drift + microlensing NE offset + lens annual parallax
     double dt_years = (Event->epoch[i] - Event->t0) / days_per_year;
   // NE offsets including lens PM (mas), using blended centroid for absolute position
-  double dN_true_mas = cN_blend_mas + muDec_masyr * dt_years;
-  double dE_true_mas = cE_blend_mas + muRA_masyr * dt_years;
-  double dN_obs_mas  = cN_blend_mas + muDec_masyr * dt_years;
-  double dE_obs_mas  = cE_blend_mas + muRA_masyr * dt_years;
+  double dN_true_mas = (f_blend0 * Event->cNtrue[i]) + muDec_masyr * dt_years;
+  double dE_true_mas = (f_blend0 * Event->cEtrue[i]) + muRA_masyr * dt_years;
+  double dN_obs_mas  = (f_blend0 * Event->cNtrue[i]) + muDec_masyr * dt_years;
+  double dE_obs_mas  = (f_blend0 * Event->cEtrue[i]) + muRA_masyr * dt_years;
 
   // Add lens annual parallax shift in NE (mas): pi_L(mas) * (observer NE displacement in AU)
   // Lenses->data[ln][DIST] is in kpc; pi_L_mas = 1 / D_kpc
@@ -426,6 +460,10 @@ void outputLightcurve(struct event *Event, struct obsfilekeywords World[], struc
   dE_true_mas += piL_mas * Epar_AU;
   dN_obs_mas  += piL_mas * Npar_AU;
   dE_obs_mas  += piL_mas * Epar_AU;
+  double centroid_N_sky_mas = dN_true_mas;
+  double centroid_E_sky_mas = dE_true_mas;
+  double measured_N_centroid_mas = Event->cNobs[i];
+  double measured_E_centroid_mas = Event->cEobs[i];
     // Convert to degrees (small-angle approx; RA scaled by cos(dec))
     double ra_true_deg = 0.0, dec_true_deg = 0.0, ra_obs_deg = 0.0, dec_obs_deg = 0.0;
     double ra_err_deg = 0.0, dec_err_deg = 0.0;
@@ -451,7 +489,8 @@ void outputLightcurve(struct event *Event, struct obsfilekeywords World[], struc
     fprintf(lcfile_ptr,
   "%.12g %.8g %.8g %.12g %.8g %d %d %.8g "
   "%.8g %.8g %.8g %.8g "
-  "%.8g %.8g %.8g %.8g %.8g %.8g "
+  "%.8g %.8g %.8g %.8g "
+  "%.8g %.8g %.8g %.8g "
   "%.12f %.12f %.12f %.12f %.12f %.12f "
   "%.6g %.6g %16.7f "
   "%.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g "
@@ -459,13 +498,10 @@ void outputLightcurve(struct event *Event, struct obsfilekeywords World[], struc
   Event->epoch[i], Event->Aobs[i], Event->Aerr[i],
   Event->Atrue[i], Event->Atrueerr[i], obsidx,
   (Event->nosat[i]?0:1), Event->Afit[i],
-  Event->xctrue[i], Event->yctrue[i], f_blend0*Event->xctrue[i], f_blend0*Event->yctrue[i],
-  Event->cNtrue[i], Event->cEtrue[i],
-  cN_blend_mas, cE_blend_mas,
-  Event->cNobserr[i], Event->cEobserr[i],
-  ra_true_deg, dec_true_deg,
-  ra_obs_deg,  dec_obs_deg,
-  ra_err_deg,  dec_err_deg,
+  centroid_x_lens1, centroid_y_lens1, centroid_x_source1, centroid_y_source1,
+  centroid_N_source1_mas, centroid_E_source1_mas, centroid_N_sky_mas, centroid_E_sky_mas,
+  measured_N_centroid_mas, measured_E_centroid_mas, Event->cNobserr[i], Event->cEobserr[i],
+  ra_true_deg, dec_true_deg, ra_obs_deg,  dec_obs_deg, ra_err_deg,  dec_err_deg,
   Event->pllx[obsidx].tshift[shiftedidx],
   Event->pllx[obsidx].ushift[shiftedidx],
   Event->pllx[obsidx].epochs[shiftedidx],

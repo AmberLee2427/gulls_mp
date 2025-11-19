@@ -5,19 +5,19 @@ import warnings
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.gridspec import GridSpec
 
 
 # Run-or-die: require BAGLE to be importable via the Python environment.
 from bagle import model
 from bagle import parallax as _bagle_parallax  # For direct parallax vector computation receipts.
-from .constants import REPO_ROOT
+from .gulls_io import read_gulls_observatory_settings, read_gulls_lightcurve, parse_out_file, load_lightcurve, calculate_magnification_from_lightcurve
+from utils import require_finite, require_series, rotation_ne_to_xy
 
 # Horizons Roman earliest supported ephemeris epoch (receipt: previously observed failure boundary)
 # Source citation: astroquery JPL Horizons error message for target "Roman Space Telescope (spacecraft)".
 _EARLIEST_ROMAN_JD = 2461343.795428987  # JD TDB
 _EARLIEST_ROMAN_MJD = _EARLIEST_ROMAN_JD - 2400000.5
+
 
 # --- Parallax / Observer Frame Audit Utilities ---------------------------------
 def audit_parallax_alignment(ra_deg: float, dec_deg: float, times_mjd: np.ndarray,
@@ -161,145 +161,12 @@ def audit_parallax_alignment(ra_deg: float, dec_deg: float, times_mjd: np.ndarra
     return diag
 
 
-def _rotation_ne_to_lens(mu_rel_E: float, mu_rel_N: float, alpha_deg: float) -> Tuple[np.ndarray, Dict[str, float]]:
-    """Compute the rotation matrix mapping (North, East) offsets to the lens-frame (x, y).
-
-    The construction mirrors VBMicrolensing's BinaryAstroLightCurve definitions (see plotting.py).
-    Raises RuntimeError if the supplied vectors do not define a proper rotation.
-    """
-    if not (np.isfinite(mu_rel_E) and np.isfinite(mu_rel_N)):
-        raise RuntimeError("Relative proper motion components must be finite for rotation diagnostic.")
-    if mu_rel_E == 0.0 and mu_rel_N == 0.0:
-        raise RuntimeError("Relative proper motion vector is zero; cannot define along-track axis.")
-    if not np.isfinite(alpha_deg):
-        raise RuntimeError("alpha_deg must be finite to construct lens-frame rotation.")
-
-    phi_mu = math.atan2(mu_rel_E, mu_rel_N)  # radians; aligns with plotting.py convention
-    ct = math.cos(phi_mu)
-    st = math.sin(phi_mu)
-    R_NE2TN_U = np.array([[ct, st], [-st, ct]], dtype=float)
-
-    ca = math.cos(math.radians(alpha_deg))
-    sa = math.sin(math.radians(alpha_deg))
-    A_alpha = np.array([[-ca, sa], [-sa, -ca]], dtype=float)
-
-    R = A_alpha @ R_NE2TN_U
-    c_est = float(R[0, 0])
-    s_est = float(R[0, 1])
-    if not (
-        np.allclose(R[1, 0], -s_est, atol=1e-6) and
-        np.allclose(R[1, 1], c_est, atol=1e-6)
-    ):
-        raise RuntimeError("Derived NE→lens rotation is not orthonormal within 1e-6; check inputs.")
-
-    phi_est = math.atan2(s_est, c_est)
-    diag = {
-        'phi_mu_deg': math.degrees(phi_mu),
-        'alpha_deg': float(alpha_deg),
-        'phi_est_deg': math.degrees(phi_est),
-    }
-    return R, diag
-
-
-def _derive_gulls_sky_centroid_ne(gulls_data: Dict[str, np.ndarray], params: Dict[str, float]) -> Tuple[np.ndarray, np.ndarray]:
-    """Return apparent sky-plane centroid offsets (mas) in the geocentric N/E frame used by GULLS.
-
-    The centroid corresponds to the lensed source image ensemble, already blended to match the light
-    curve definition. RA/Dec from the light curve header define the observer frame (geocentric) and
-    the origin at the reported lens position.
-    """
-    for key in ("true_centroid_ra_deg", "true_centroid_dec_deg"):
-        if key not in gulls_data:
-            raise RuntimeError(f"Lightcurve missing required column '{key}' for sky-plane astrometry reconstruction.")
-
-    ra_series = np.asarray(gulls_data['true_centroid_ra_deg'], dtype=float)
-    dec_series = np.asarray(gulls_data['true_centroid_dec_deg'], dtype=float)
-    if ra_series.size == 0:
-        raise RuntimeError("Cannot derive sky-plane astrometry from empty RA/Dec series.")
-    if not (np.all(np.isfinite(ra_series)) and np.all(np.isfinite(dec_series))):
-        raise RuntimeError("RA/Dec series contain non-finite values; cannot derive sky-plane NE offsets.")
-
-    ra0 = float(params.get('raL'))
-    dec0 = float(params.get('decL'))
-    if not (np.isfinite(ra0) and np.isfinite(dec0)):
-        raise RuntimeError("Params must provide finite raL/decL for sky-plane astrometry reconstruction.")
-
-    ra_rad = np.deg2rad(ra_series)
-    dec_rad = np.deg2rad(dec_series)
-    ra0_rad = math.radians(ra0)
-    dec0_rad = math.radians(dec0)
-
-    delta_ra_rad = np.unwrap(ra_rad - ra0_rad)
-    delta_dec_rad = dec_rad - dec0_rad
-
-    cos_dec0 = math.cos(dec0_rad)
-    if abs(cos_dec0) < 1e-9:
-        raise RuntimeError("Reference declination too close to ±90°, cannot project RA offsets without blow-up.")
-
-    rad_to_mas = (180.0 / math.pi) * 3600.0 * 1000.0
-    east_mas = delta_ra_rad * cos_dec0 * rad_to_mas
-    north_mas = delta_dec_rad * rad_to_mas
-    return north_mas, east_mas
-
-
-def _read_gulls_observatory_settings(params: Dict[str, str]) -> Dict[str, Any]:
-    """Deterministically resolve GULLS observatory settings from params.
-
-    Uses OBSERVATORY_DIR and OBSERVATORY_LIST to locate the observatory file(s),
-    reads the first listed file, and extracts SPACE/ORBIT (and NAME when present).
-
-    Returns a dict with keys: { 'file': Path, 'SPACE': int|None, 'ORBIT': int|None, 'NAME': str|None }.
-    Raises on any missing paths or unreadable files.
-    """
-    obs_dir = params.get('OBSERVATORY_DIR')
-    obs_list = params.get('OBSERVATORY_LIST')
-    if not obs_dir or not obs_list:
-        raise RuntimeError("Parameter file must define OBSERVATORY_DIR and OBSERVATORY_LIST to resolve observer.")
-
-    list_path = (REPO_ROOT / obs_dir / obs_list).resolve()
-    if not list_path.is_file():
-        raise RuntimeError(f"Observatory list not found: {list_path}")
-
-    entries: List[str] = [
-        ln.strip() for ln in list_path.read_text(encoding='utf-8').splitlines()
-        if ln.strip() and not ln.strip().startswith('#')
-    ]
-    if not entries:
-        raise RuntimeError(f"Observatory list file is empty: {list_path}")
-
-    first = entries[0]
-    obs_file = (REPO_ROOT / obs_dir / first).resolve()
-    if not obs_file.is_file():
-        raise RuntimeError(f"Observatory file not found from list: {obs_file}")
-
-    # Parse key/value style where keys and values may be whitespace or tab separated
-    kv: Dict[str, str] = {}
-    for raw in obs_file.read_text(encoding='utf-8').splitlines():
-        stripped = raw.strip()
-        if not stripped or stripped.startswith('#'):
-            continue
-        parts = stripped.replace('\t', ' ').split()
-        if len(parts) >= 2:
-            key = parts[0].upper()
-            val = parts[1]
-            kv[key] = val
-
-    out: Dict[str, Any] = {
-        'file': obs_file,
-        'SPACE': int(kv['SPACE']) if 'SPACE' in kv and kv['SPACE'].isdigit() else (1 if kv.get('SPACE') in ('true', 'True') else None),
-        'ORBIT': int(kv['ORBIT']) if 'ORBIT' in kv and kv['ORBIT'].isdigit() else None,
-        'NAME': kv.get('NAME')
-    }
-    return out
-
-"""Strict mode: offline L2 approximation has been removed. Horizons must resolve '-211'."""
-
 def _resolve_and_apply_bagle_observer(bagle_model, params: Dict[str, str], ra_deg: float, dec_deg: float, times_mjd: np.ndarray, verbose: bool) -> Tuple[str, Dict[str, Any]]:
     """Resolve GULLS observer and set bagle_model.obsLocation accordingly.
 
     Returns (used_obs_location, receipt_dict). Raises on unresolvable/unsupported settings.
     """
-    settings = _read_gulls_observatory_settings(params)
+    settings = read_gulls_observatory_settings(params)
     space_flag = settings.get('SPACE')
     orbit_code = settings.get('ORBIT')
     receipt: Dict[str, Any] = {
@@ -323,10 +190,7 @@ def _resolve_and_apply_bagle_observer(bagle_model, params: Dict[str, str], ra_de
 
     # Apply to model; BAGLE indexes obsLocation by filt_idx, so supply a single-element list to avoid
     # truncating strings like '-211' when treated as a sequence.
-    try:
-        bagle_model.obsLocation = [used]
-    except Exception as ex:
-        raise RuntimeError(f"Failed to apply obsLocation '{used}' to BAGLE model: {type(ex).__name__}: {ex}")
+    bagle_model.obsLocation = [used]
     # Minimal observer debug: echo only the resolved/used observer string
     # (debug removed)
 
@@ -334,12 +198,6 @@ def _resolve_and_apply_bagle_observer(bagle_model, params: Dict[str, str], ra_de
     # Quick sanity probe via audit function later; return
     return used, receipt
 
-def parse_out_file(out_file: Path) -> Dict[str, Any]:
-    with open(out_file, 'r') as f:
-        columns = f.readline().strip().split()
-        values = f.readline().strip().split()
-    data = {col: val for col, val in zip(columns, values)}
-    return data
 
 def convert_to_bagle_params(out_params: Dict[str, Any], simulation_zero_time: float, event_type: str) -> Dict[str, float]:
     """Convert gulls .out parameters to BAGLE model parameters.
@@ -409,18 +267,15 @@ def convert_to_bagle_params(out_params: Dict[str, Any], simulation_zero_time: fl
     #  - Other notes: "All times must be reported in MJD."
     #  - Method docstrings (e.g., get_amplification/get_astrometry) specify t is MJD.
     t0_mjd = t0_bjd - 2400000.5
-    params['t0'] = t0_mjd  # reassignable later after origin reparam
     params['t0_original'] = t0_mjd  # retain original (COM frame) for plotting/diagnostics
 
     # Reference time (tref) in .out used by GULLS parallax setup (geocentric transform anchor)
-    tref_rel = float(out_params['tref'])
-    if not np.isfinite(tref_rel):
+    tref = float(out_params['tref'])
+    if not np.isfinite(tref):
         raise ValueError(f"tref must be finite (BJD-relative days); got {out_params['tref']!r}")
-    tref_bjd = tref_rel + simulation_zero_time
-    tref_mjd = tref_bjd - 2400000.5
+    tref_bjd = tref + simulation_zero_time
+    tref_mjd = tref_bjd - 2400000.5  # what the actual fuck is mjd?
     params['t_ref_mjd'] = tref_mjd
-    # Expose a conceptual t0_par equal to tref (geocentric reference) for diagnostics
-    params['t0_par'] = tref_mjd
 
     thetaE = float(out_params['thetaE'])
     if not np.isfinite(thetaE) or thetaE <= 0:
@@ -430,19 +285,19 @@ def convert_to_bagle_params(out_params: Dict[str, Any], simulation_zero_time: fl
     # GULLS .out provides u0lens1 which can be negative (e.g., -0.787... in sample). BAGLE allows beta (closest approach)
     # to be signed; sign encodes orientation (beta > 0 when source East of lens per BAGLE PSBL_PhotAstromParam1 docstring).
     # We map beta_signed = u0lens1 * thetaE directly, preserving sign, and record u0_amp = abs(u0lens1).
-    raw_u0 = float(out_params['u0lens1'])
-    if not np.isfinite(raw_u0):
+    u0_gulls = float(out_params['u0lens1'])
+    if not np.isfinite(u0_gulls):
         raise ValueError(f"u0lens1 must be finite (Einstein radii); got {out_params['u0lens1']!r}")
     # UNIT NOTE: beta is an angular closest approach. We construct it in mas via beta = u0 * thetaE (mas).
     # In BAGLE's PSBL_PhotAstrom pipeline, Einstein-radii vs. arcsec unit handling is mixed:
     # - source trajectory uses Einstein radii (u),
     # - lens astrometry uses arcsec and converts mas->arcsec with 1e-3 (see model.py ~6160: xL += (piL * parallax)*1e-3).
     # If BAGLE later normalizes by thetaE internally to compute u, a mas vs arcsec mismatch would scale timescales by ~1e3.
-    params['beta'] = raw_u0 * thetaE  # signed beta (mas)
-    params['u0_amp'] = abs(raw_u0)    # magnitude in Einstein radii
-    params['u0_signed'] = raw_u0      # retain original sign for receipts
-    s_dimless = float(out_params['Planet_s'])
-    if not np.isfinite(s_dimless) or s_dimless <= 0:
+    params['beta_mas'] = u0_gulls * thetaE  # signed beta (mas)
+    # and I suppose we just hope the signs go the same way
+    params['u0_original'] = u0_gulls      # retain original sign for receipts
+    s_ER = float(out_params['Planet_s'])
+    if not np.isfinite(s_ER) or s_ER <= 0:
         raise ValueError(f"Planet_s must be positive finite (Einstein radii); got {out_params['Planet_s']!r}")
     # UNIT NOTE (BAGLE model.py ~6160-6180):
     #   PSBL_PhotAstrom computes lens offsets as:
@@ -453,7 +308,7 @@ def convert_to_bagle_params(out_params: Dict[str, Any], simulation_zero_time: fl
     # ORIGIN NOTE (midpoint vs COM):
     #   The 0.5*sep midpoint placement differs from a center-of-mass reference. With tiny q, COM≈primary, while
     #   midpoint shifts primary by ~sep/2. This can alter effective u0 and t0 vs GULLS. Keep this in mind if large peak lags persist.
-    params['sep'] = s_dimless * thetaE
+    params['projected_separation_mas'] = s_ER * thetaE
     # Alpha handling:
     # - GULLS generation sets Event->alpha in degrees in buildEvent.cpp:
     #   Event->alpha = 360.0 * ran2(idum);  (uniform in [0,360) deg)
@@ -461,18 +316,18 @@ def convert_to_bagle_params(out_params: Dict[str, Any], simulation_zero_time: fl
     #   BAGLE_Microlensing/src/bagle/fake_data.py (see docstring near the call to
     #   model.PSBL_PhotAstrom_Par_Param1 where "alpha : float (degrees)" is specified).
     # Therefore: keep alpha in degrees when passing into BAGLE.
-    alpha_raw = float(out_params['alpha'])  # degrees from GULLS (angle between trajectory and binary axis)
-    if not np.isfinite(alpha_raw) or not (0.0 <= alpha_raw < 360.0 + 1e-9):
+    alpha_deg = float(out_params['alpha'])  # degrees from GULLS (angle between trajectory and binary axis)
+    if not np.isfinite(alpha_deg) or not (0.0 <= alpha_deg < 360.0 + 1e-9):
         raise ValueError(
             "alpha must be finite degrees in [0, 360). "
             "Receipt: GULLS generates alpha in degrees (uniform 0..360) and BAGLE expects degrees: "
             "BAGLE_Microlensing/src/bagle/fake_data.py:597 (fake_data_PSBL docstring lists 'alpha : float (degrees)').")
     # Defer mapping to BAGLE alpha until after we compute the sky trajectory angle from proper motions.
-    params['alpha_raw_rel'] = alpha_raw    # store relative angle (traj vs axis) for reparameterization
+    params['alpha_deg_rel_to_x'] = alpha_deg    # store relative angle (traj vs axis) for reparameterization
     rho = float(out_params['rho'])
     if not np.isfinite(rho) or rho <= 0:
         raise ValueError(f"rho must be positive finite (dimensionless); got {out_params['rho']!r}")
-    params['rho'] = rho
+    params['rho_ER'] = rho
 
     # Separation remains the physical midpoint-frame value: sep = s * thetaE (mas).
     # We DO NOT alter sep for COM emulation now; instead we reparameterize t0 and beta below to account for origin shift.
@@ -493,10 +348,13 @@ def convert_to_bagle_params(out_params: Dict[str, Any], simulation_zero_time: fl
     params['dL_dS'] = params['dL'] / params['dS']
 
     # Proper motions: gulls outputs are Galactic (l,b) mas/yr; BAGLE wants RA/Dec (E,N) mas/yr.
+    # geo, helio, or L2???
     # Transform using astropy.
     from astropy.coordinates import SkyCoord
     import astropy.units as u
+    
     # Build Galactic coords with proper motions; gulls columns are in degrees.
+    # are these helio centric. WTF is happening here?
     lens_coord_gal = SkyCoord(l=float(out_params['Lens_l'])*u.deg,
                               b=float(out_params['Lens_b'])*u.deg,
                               pm_l_cosb=float(out_params['Lens_mul'])*u.mas/u.yr,
@@ -519,27 +377,29 @@ def convert_to_bagle_params(out_params: Dict[str, Any], simulation_zero_time: fl
     source_icrs = source_coord_gal.icrs
     params['muS_E'] = source_icrs.pm_ra_cosdec.to_value(u.mas/u.yr)
     params['muS_N'] = source_icrs.pm_dec.to_value(u.mas/u.yr)
-    # NOTE: Relative proper motion sets trajectory speed. If BAGLE normalizes w.r.t. thetaE in arcsec while thetaE is given in mas,
-    # tE could be off by ~1e3, broadening the light curve and shifting the peak. Track this if peak lag persists.
     if not (np.isfinite(params['muS_E']) and np.isfinite(params['muS_N'])):
         raise ValueError("Source proper motions transformed to ICRS are non-finite (mas/yr). Check input mul/mub.")
 
     # Astrometric reference – source position relative to lens at t0 (arcsec)
-    v_rel_E = params['muS_E'] - params['muL_E']
-    v_rel_N = params['muS_N'] - params['muL_N']
-    v_hat_norm = np.hypot(v_rel_E, v_rel_N)
-    if v_hat_norm == 0.0:
+    # πrel = θEπE
+    # µhel = µgeo + µ⊕πrel =θE/tE * πE,geo/πE + µ⊕πEθE, 
+    # where µ⊕ ≡ v⊕,⊥/AU and v⊕,⊥ is the transverse velocity of Earth in the frame of the Sun at the peak of the event, projected on the plane of the sky
+    # μrel = |μl − μs| mas/yr (geo, helio or L2?)
+    mu_rel_E = params['muL_E'] - params['muS_E']  # mas/yr  (geo, helio or L2?)
+    mu_rel_N = params['muL_N'] - params['muS_N']
+    mu_rel_norm = np.hypot(mu_rel_E, mu_rel_N)
+    if mu_rel_norm == 0.0:
         raise ValueError("Relative proper motion vector is zero; cannot define perpendicular u0 orientation.")
-    v_hat_E = v_rel_E / v_hat_norm
-    v_hat_N = v_rel_N / v_hat_norm
-    perp_E = v_hat_N
-    perp_N = -v_hat_E
-    sgn = 1.0 if raw_u0 >= 0.0 else -1.0
-    u_hat_E = perp_E * sgn
-    u_hat_N = perp_N * sgn
+    v_hat_E = mu_rel_E / mu_rel_norm
+    v_hat_N = mu_rel_N / mu_rel_norm
+    # Rotate v_hat 90 deg CCW to get u_hat (perpendicular to relative motion, oriented such that
+    
+    
+
     v_hat_vec = np.array([v_hat_E, v_hat_N])
     u_hat_vec = np.array([u_hat_E, u_hat_N])
-    thetaS0_mas = abs(raw_u0) * thetaE
+    thetaS0_mas = abs(u0_gulls) * thetaE
+    # What the fuck is xS0
     params['xS0_E'] = (thetaS0_mas * u_hat_E) * 1e-3  # arcsec
     params['xS0_N'] = (thetaS0_mas * u_hat_N) * 1e-3
 
@@ -590,10 +450,10 @@ def convert_to_bagle_params(out_params: Dict[str, Any], simulation_zero_time: fl
 
     # Photometric scaling – required for BAGLE model construction
     params['b_sff'] = [1.0]
-    mag_src_val = float(out_params['Source_W146'])
-    if not np.isfinite(mag_src_val):
+    mag_source_val = float(out_params['Source_W146'])  # magnitude
+    if not np.isfinite(mag_source_val):
         raise ValueError(f"Source_W146 must be finite magnitude; got {out_params['Source_W146']!r}")
-    params['mag_src'] = [mag_src_val]
+    params['mag_source'] = [mag_source_val]  # W146 magnitude
     # Keep lens mag for photometric blend computation (not passed into BAGLE model)
     mag_lens_val = float(out_params['Lens_W146'])
     if not np.isfinite(mag_lens_val):
@@ -761,47 +621,13 @@ def convert_to_bagle_params(out_params: Dict[str, Any], simulation_zero_time: fl
         'piE_scalar': params['piE']
     }
     # Sanity: expected list lengths for 1 filter
-    if not (isinstance(params['b_sff'], list) and isinstance(params['mag_src'], list)):
-        raise TypeError("b_sff and mag_src must be lists (one entry per filter)")
-    if not (len(params['b_sff']) == len(params['mag_src']) == 1):
-        raise ValueError(f"Expected exactly 1 photometric filter; got b_sff len={len(params['b_sff'])}, mag_src len={len(params['mag_src'])}")
+    if not (isinstance(params['b_sff'], list) and isinstance(params['mag_source'], list)):
+        raise TypeError("b_sff and mag_source must be lists (one entry per filter)")
+    if not (len(params['b_sff']) == len(params['mag_source']) == 1):
+        raise ValueError(f"Expected exactly 1 photometric filter; got b_sff len={len(params['b_sff'])}, mag_source len={len(params['mag_source'])}")
 
     return params
 
-def load_lightcurve(lc_file: Path) -> Tuple[np.ndarray, Dict[str, np.ndarray], Dict[str, Any]]:
-    """Read a GULLS .lc using shared helper used by smoke test plotting.
-
-        Returns:
-            - times_mjd: numpy array of MJD (assumed TDB) derived from BJD in the file.
-                Receipts:
-                - MJD = JD - 2400000.5
-                - GULLS BJD column is written by C++ in gulls_mp/src/outputLightcurve.cpp,
-                    header defines "BJD" and rows emit Event->pllx[obsidx].epochs[shiftedidx].
-                    This is the absolute time stamp used by the generator (assumed BJD_TDB).
-                - BAGLE requires MJD inputs and internally uses TDB for parallax
-                    (BAGLE_Microlensing/src/bagle/model.py “Other notes”; and
-                     BAGLE_Microlensing/src/bagle/parallax.py builds Time(..., scale='tdb')).
-                - Assumes GULLS BJD column is BJD_TDB. No UTC/TT conversion is attempted.
-      - data: dict of numpy arrays for all numeric columns
-      - meta: header metadata parsed (#Planet, #Event, #fs)
-    """
-    from .lightcurve_io import read_gulls_lightcurve
-
-    df, meta = read_gulls_lightcurve(lc_file)
-    if 'BJD' not in df.columns:
-        raise ValueError(f"Lightcurve missing BJD column: {lc_file}")
-    times_mjd = df['BJD'].to_numpy(dtype=float, copy=False) - 2400000.5
-    # Time scale diagnostic (receipt only, no mutation): compute median spacing and check for
-    # sub-second irregularities that might hint at UTC leap second handling instead of TDB.
-    # If suspicious patterns found in future, escalate rather than silently adjust.
-    if len(times_mjd) > 2:
-        dt = np.diff(np.sort(times_mjd))
-        med_dt = float(np.median(dt))
-        # If median cadence < 1e-4 days (~8.64 s) we still accept; we only warn on pathological negative or zero.
-        if med_dt <= 0:
-            raise ValueError(f"Non-positive median cadence detected (med_dt={med_dt}); investigate time stamps before validation.")
-    data = {col: df[col].to_numpy(dtype=float, copy=False) for col in df.columns}
-    return times_mjd, data, meta
 
 def create_bagle_model(params: Dict[str, float], event_type: str, use_parallax: bool):
     """Construct the appropriate BAGLE model with correct parameter mapping.
@@ -840,7 +666,7 @@ def create_bagle_model(params: Dict[str, float], event_type: str, use_parallax: 
                 muS_E=params['muS_E'], muS_N=params['muS_N'],
                 dL=params['dL'], dS=params['dS'],
                 sep=params['sep'], alpha=params['alpha'],
-                b_sff=params['b_sff'], mag_src=params['mag_src'], dmag_Lp_Ls=params['dmag_Lp_Ls'],
+                b_sff=params['b_sff'], mag_src=params['mag_source'], dmag_Lp_Ls=params['dmag_Lp_Ls'],
                 raL=params['raL'], decL=params['decL']
             )
         else:
@@ -852,7 +678,7 @@ def create_bagle_model(params: Dict[str, float], event_type: str, use_parallax: 
                 muS_E=params['muS_E'], muS_N=params['muS_N'],
                 dL=params['dL'], dS=params['dS'],
                 sep=params['sep'], alpha=params['alpha'],
-                b_sff=params['b_sff'], mag_src=params['mag_src'], dmag_Lp_Ls=params['dmag_Lp_Ls']
+                b_sff=params['b_sff'], mag_src=params['mag_source'], dmag_Lp_Ls=params['dmag_Lp_Ls']
             )
     else:
         # Note: BSBL Param1 has additional source binary parameters (sepS, alphaS, etc.).
@@ -997,13 +823,13 @@ def compute_bagle_predictions(bagle_model, times_bjd: np.ndarray, params: Dict[s
         xS0_N = float(params.get('xS0_N', 0.0))
         muS_E = float(params['muS_E'])
         muS_N = float(params['muS_N'])
-        srce_E_mas = xS0_E + (dt_days / days_per_year) * muS_E
-        srce_N_mas = xS0_N + (dt_days / days_per_year) * muS_N
+        source_E_mas = xS0_E + (dt_days / days_per_year) * muS_E
+        source_N_mas = xS0_N + (dt_days / days_per_year) * muS_N
         # BAGLE returns centroid shift as (E, N) corresponding to (RA_offset, Dec_offset)
         # Convert to apparent sky-plane centroid (geocentric, lensed ensemble blended as in BAGLE) by
         # adding source proper motion to the shift. N/E ordering follows plotting.py conventions.
-        sky_centroid_E_mas = srce_E_mas + shift[:, 0]
-        sky_centroid_N_mas = srce_N_mas + shift[:, 1]
+        sky_centroid_E_mas = source_E_mas + shift[:, 0]
+        sky_centroid_N_mas = source_N_mas + shift[:, 1]
 
         # Map BAGLE centroid shift into the GULLS lens frame (Einstein radii).
         thetaE_mas = float(params.get('thetaE'))
@@ -1014,20 +840,20 @@ def compute_bagle_predictions(bagle_model, times_bjd: np.ndarray, params: Dict[s
         alpha_axis_deg = params.get('alpha')
         if alpha_axis_deg is None:
             raise RuntimeError("Params missing lens-frame axis orientation 'alpha'.")
-        R_ne_to_lens, rot_diag = _rotation_ne_to_lens(mu_rel_E, mu_rel_N, float(alpha_axis_deg))
+        R_ne_to_xy, rot_diag = _rotation_ne_to_xy(mu_rel_E, mu_rel_N, float(alpha_axis_deg))
 
         # shift is (E,N); build [N,E] then convert to ER and rotate
         ne_shift_mas = np.column_stack((shift[:, 1], shift[:, 0]))
         ne_shift_er = ne_shift_mas / thetaE_mas
-        lens_rel_er = (R_ne_to_lens @ ne_shift_er.T).T  # columns: x, y in Einstein radii relative to source
+        lens_rel_er = (R_ne_to_xy @ ne_shift_er.T).T  # columns: x, y in Einstein radii relative to source
 
         out: Dict[str, Any] = {
             'A': A,
             'shift_E': shift[:, 0], 'shift_N': shift[:, 1],
             'sky_centroid_E_mas': sky_centroid_E_mas, 'sky_centroid_N_mas': sky_centroid_N_mas,
-            'srce_E': srce_E_mas, 'srce_N': srce_N_mas,
+            'source_E': source_E_mas, 'source_N': source_N_mas,
             'lens_rel_x': lens_rel_er[:, 0], 'lens_rel_y': lens_rel_er[:, 1],
-            'rotation_NE_to_lens': R_ne_to_lens,
+            'rotation_NE_to_xy': R_ne_to_xy,
             'rotation_diag': rot_diag,
         }
         if bad_polys:
@@ -1036,245 +862,280 @@ def compute_bagle_predictions(bagle_model, times_bjd: np.ndarray, params: Dict[s
     finally:
         np.roots = orig_roots
 
+
 def plot_validation(times_bjd, gulls_data, bagle_data, params, output_file, event_label, bagle_model=None):
-    fig = plt.figure(figsize=(18, 12))
-    gs = GridSpec(3, 3, figure=fig, hspace=0.35, wspace=0.35)
-    # Current working t0 (after any reparameterization)
-    t0_used = params['t0']
-    # Optional references for clarity
-    t0_mid = params.get('t0_midpoint', t0_used)
-    t0_orig = params.get('t0_original', None)
+    times = np.asarray(times_bjd, dtype=float)
+    if times.size == 0:
+        raise RuntimeError("plot_validation requires non-empty time samples.")
     if 't_ref_mjd' not in params or not np.isfinite(params['t_ref_mjd']):
         raise RuntimeError("plot_validation requires finite t_ref_mjd; validator should have confirmed tref in the .out file.")
-    t_ref = float(params['t_ref_mjd'])
-    # Use physics-based deblended magnification (requires fs)
-    A_gulls = gulls_data['A_deblended']
 
-    def _require_series(container: Dict[str, np.ndarray], key: str, context: str) -> np.ndarray:
-        if key not in container:
-            raise RuntimeError(f"{context} missing required series '{key}' for plot rendering.")
-        arr = np.asarray(container[key], dtype=float)
-        if arr.ndim != 1 or arr.size != len(times_bjd):
-            raise RuntimeError(
-                f"{context} series '{key}' has shape {arr.shape}; expected ({len(times_bjd)},)."
-            )
-        if not np.all(np.isfinite(arr)):
-            raise RuntimeError(f"{context} series '{key}' contains non-finite values.")
+    t0_used = float(params['t0'])
+    t0_mid = float(params['t0_midpoint'])
+    t0_orig = float(params['t0_original'])
+    t_ref = float(params['t_ref_mjd'])
+    thetaE = float(params['thetaE'])
+    for label, value in (
+        ('t0_used', t0_used),
+        ('t0_midpoint', t0_mid),
+        ('t0_original', t0_orig),
+        ('t_ref_mjd', t_ref),
+        ('thetaE', thetaE),
+    ):
+        if not np.isfinite(value):
+            raise RuntimeError(f"plot_validation requires finite {label}; got {value}")
+
+    rotation_ne_to_xy = np.asarray(bagle_data['rotation_NE_to_xy'], dtype=float)
+    if rotation_ne_to_xy.shape != (2, 2):
+        raise RuntimeError("rotation_NE_to_xy must be 2x2.")
+
+    def _gulls_series(name: str, label: str) -> np.ndarray:
+        arr = _require_series(gulls_data, name, label)
+        if arr.shape[0] != times.shape[0]:
+            raise RuntimeError(f"{label} length {arr.shape[0]} != time samples {times.shape[0]}")
         return arr
 
-    gulls_abs_N = _require_series(gulls_data, 'sky_centroid_N_mas', 'gulls_data')
-    gulls_abs_E = _require_series(gulls_data, 'sky_centroid_E_mas', 'gulls_data')
-    bagle_abs_N = _require_series(bagle_data, 'sky_centroid_N_mas', 'bagle_data')
-    bagle_abs_E = _require_series(bagle_data, 'sky_centroid_E_mas', 'bagle_data')
-    lens_rel_x_gulls = _require_series(gulls_data, 'lens_rel_x', 'gulls_data')
-    lens_rel_y_gulls = _require_series(gulls_data, 'lens_rel_y', 'gulls_data')
-    lens_rel_x_bagle = _require_series(bagle_data, 'lens_rel_x', 'bagle_data')
-    lens_rel_y_bagle = _require_series(bagle_data, 'lens_rel_y', 'bagle_data')
-    source_x_series = _require_series(gulls_data, 'source_x', 'gulls_data')
-    source_y_series = _require_series(gulls_data, 'source_y', 'gulls_data')
-    
-    ax1 = fig.add_subplot(gs[0, 0])
-    ax1.plot(times_bjd, A_gulls, 'b.', label='gulls', alpha=0.5, markersize=2)
-    ax1.plot(times_bjd, bagle_data['A'], 'r-', label='BAGLE', alpha=0.7)
-    # Reference lines: show all available only on the first panel to keep legends tidy
-    ax1.axvline(t0_used, color='k', linestyle='--', alpha=0.6, label=f't0_used={t0_used:.2f}')
-    ax1.axvline(t0_orig, color='purple', linestyle='--', alpha=0.5, label=f't0_orig={t0_orig:.2f}')
-    ax1.axvline(t0_mid, color='gray', linestyle='--', alpha=0.4, label=f't0_mid={t0_mid:.2f}')
-    ax1.axvline(t_ref, color='green', linestyle='-.', alpha=0.5, label=f'tref={t_ref:.2f}')
-    ax1.set_xlabel('Time (MJD)'); ax1.set_ylabel('Magnification A'); ax1.set_title(f'{event_label}: Magnification')
-    ax1.legend(); ax1.grid(alpha=0.3)
-    
-    ax2 = fig.add_subplot(gs[0, 1])
-    A_residual = A_gulls - bagle_data['A']
-    ax2.plot(times_bjd, A_residual, 'k.', markersize=2)
-    ax2.axhline(0, color='r', linestyle='--', alpha=0.5)
-    ax2.axvline(t0_used, color='k', linestyle='--', alpha=0.6)
-    ax2.axvline(t0_orig, color='purple', linestyle='--', alpha=0.5)
-    ax2.axvline(t0_mid, color='gray', linestyle='--', alpha=0.4)
-    ax2.axvline(t_ref, color='green', linestyle='-.', alpha=0.5)
-    ax2.set_xlabel('Time (MJD)'); ax2.set_ylabel('Magnification Residual\n(gulls - BAGLE)'); ax2.set_title('Residuals')
-    ax2.grid(alpha=0.3)
-    
-    ax3 = fig.add_subplot(gs[0, 2])
-    A_rms = np.sqrt(np.mean(A_residual**2))
-    ax3.hist(A_residual, bins=50, edgecolor='black', alpha=0.7); ax3.axvline(0, color='r', linestyle='--', linewidth=2)
-    ax3.set_xlabel('Magnification Residual'); ax3.set_ylabel('Count'); ax3.set_title(f'RMS={A_rms:.4e}')
-    ax3.grid(alpha=0.3)
-    
-    ax4 = fig.add_subplot(gs[1, 0])
-    ax4.plot(times_bjd, gulls_abs_N, 'b.', label='gulls sky centroid', alpha=0.5, markersize=2)
-    ax4.plot(times_bjd, bagle_abs_N, 'r-', label='BAGLE sky centroid', alpha=0.7)
-    # Optional: show raw shift for reference (faint)
-    ax4.plot(times_bjd, bagle_data['shift_N'], color='r', linestyle=':', alpha=0.3, label='BAGLE shift (rel)')
-    ax4.axvline(t0_used, color='k', linestyle='--', alpha=0.6)
-    ax4.axvline(t0_orig, color='purple', linestyle='--', alpha=0.5)
-    ax4.axvline(t0_mid, color='gray', linestyle='--', alpha=0.4)
-    ax4.axvline(t_ref, color='green', linestyle='-.', alpha=0.5)
-    ax4.axhline(0, color='gray', linestyle=':', alpha=0.3)
-    ax4.set_xlabel('Time (MJD)'); ax4.set_ylabel('North Shift (mas)'); ax4.set_title('Astrometry: North sky centroid')
-    ax4.legend(); ax4.grid(alpha=0.3)
-    
-    ax5 = fig.add_subplot(gs[1, 1])
-    ax5.plot(times_bjd, gulls_abs_E, 'b.', label='gulls sky centroid', alpha=0.5, markersize=2)
-    ax5.plot(times_bjd, bagle_abs_E, 'r-', label='BAGLE sky centroid', alpha=0.7)
-    ax5.plot(times_bjd, bagle_data['shift_E'], color='r', linestyle=':', alpha=0.3, label='BAGLE shift (rel)')
-    ax5.axvline(t0_used, color='k', linestyle='--', alpha=0.6)
-    ax5.axvline(t0_orig, color='purple', linestyle='--', alpha=0.5)
-    ax5.axvline(t0_mid, color='gray', linestyle='--', alpha=0.4)
-    ax5.axvline(t_ref, color='green', linestyle='-.', alpha=0.5)
-    ax5.axhline(0, color='gray', linestyle=':', alpha=0.3)
-    ax5.set_xlabel('Time (MJD)'); ax5.set_ylabel('East Shift (mas)'); ax5.set_title('Astrometry: East sky centroid')
-    ax5.legend(); ax5.grid(alpha=0.3)
-    
-    ax6 = fig.add_subplot(gs[1, 2])
-    scatter = ax6.scatter(gulls_abs_E, gulls_abs_N,
-                          c=times_bjd, cmap='viridis', s=20, alpha=0.6, label='gulls sky centroid')
-    ax6.plot(bagle_abs_E,
-             bagle_abs_N, 'r-', alpha=0.5, linewidth=1, label='BAGLE sky centroid')
-    ax6.plot(bagle_data['shift_E'], bagle_data['shift_N'], color='r', linestyle=':', alpha=0.3, linewidth=1, label='BAGLE shift (rel)')
-    if lens_rel_x_gulls.size and lens_rel_x_bagle.size and source_x_series.size == lens_rel_x_gulls.size:
-        ax6.plot(lens_rel_x_gulls + source_x_series,
-                 lens_rel_y_gulls + source_y_series, color='C0', linestyle='--', alpha=0.4, label='gulls lens-frame (rel)')
-        ax6.plot(lens_rel_x_bagle + source_x_series,
-                 lens_rel_y_bagle + source_y_series, color='magenta', linestyle='--', alpha=0.4, label='BAGLE lens-frame (rel)')
-    ax6.plot(0, 0, 'k+', markersize=10, markeredgewidth=2, label='Unlensed')
-    ax6.set_xlabel('East (mas)'); ax6.set_ylabel('North (mas)'); ax6.set_title('Sky (absolute centroids, N=up, E=right)')
-    ax6.legend(); ax6.grid(alpha=0.3); ax6.axis('equal')
-    cbar = plt.colorbar(scatter, ax=ax6); cbar.set_label('MJD')
-    
-    ax7 = fig.add_subplot(gs[2, 0])
-    N_residual = gulls_abs_N - bagle_abs_N
-    ax7.plot(times_bjd, N_residual, 'k.', markersize=2)
-    ax7.axhline(0, color='r', linestyle='--', alpha=0.5)
-    ax7.axvline(t0_used, color='k', linestyle='--', alpha=0.6)
-    if t0_orig is not None:
-        ax7.axvline(t0_orig, color='purple', linestyle='--', alpha=0.5)
-    if (t0_mid is not None) and (abs(t0_mid - t0_used) > 1e-9):
-        ax7.axvline(t0_mid, color='gray', linestyle='--', alpha=0.4)
-    if t_ref is not None and np.isfinite(t_ref):
-        ax7.axvline(t_ref, color='green', linestyle='-.', alpha=0.5)
-    ax7.set_xlabel('Time (MJD)'); ax7.set_ylabel('North Residual (mas)'); ax7.set_title('North Residuals')
-    ax7.grid(alpha=0.3)
-    
-    ax8 = fig.add_subplot(gs[2, 1])
-    E_residual = gulls_abs_E - bagle_abs_E
-    ax8.plot(times_bjd, E_residual, 'k.', markersize=2)
-    ax8.axhline(0, color='r', linestyle='--', alpha=0.5)
-    ax8.axvline(t0_used, color='k', linestyle='--', alpha=0.6)
-    if t0_orig is not None:
-        ax8.axvline(t0_orig, color='purple', linestyle='--', alpha=0.5)
-    if (t0_mid is not None) and (abs(t0_mid - t0_used) > 1e-9):
-        ax8.axvline(t0_mid, color='gray', linestyle='--', alpha=0.4)
-    if t_ref is not None and np.isfinite(t_ref):
-        ax8.axvline(t_ref, color='green', linestyle='-.', alpha=0.5)
-    ax8.set_xlabel('Time (MJD)'); ax8.set_ylabel('East Residual (mas)'); ax8.set_title('East Residuals')
-    ax8.grid(alpha=0.3)
-    
-    # On-sky astrometry panel (degrees) — apparent RA/Dec using small-angle conversion about event ra_deg/dec_deg
-    ax9 = fig.add_subplot(gs[2, 2])
-    # Anchor apparent RA/Dec at the event coordinates ra_deg/dec_deg from the .out file
-    ra0 = float(params['raL']); dec0 = float(params['decL'])
-    cosd = np.cos(np.deg2rad(dec0)) if np.isfinite(dec0) else 1.0
-    # BAGLE apparent sky centroid (mas) -> arcsec (about ra0, dec0)
-    cenE_arcsec = np.asarray(bagle_data.get('sky_centroid_E_mas', bagle_data['shift_E']), dtype=float) / 1e3
-    cenN_arcsec = np.asarray(bagle_data.get('sky_centroid_N_mas', bagle_data['shift_N']), dtype=float) / 1e3
-    # Source and lens reference tracks
-    # Source track from PM (arcsec). xS0_E/N are in arcsec per BAGLE model conventions.
-    dt_days = np.asarray(times_bjd, dtype=float) - float(params['t0'])
-    days_per_year = 365.25
-    xS0_E_arcsec = float(params.get('xS0_E', 0.0))
-    xS0_N_arcsec = float(params.get('xS0_N', 0.0))
-    muS_E_asyr = float(params['muS_E']) * 1e-3
-    muS_N_asyr = float(params['muS_N']) * 1e-3
-    srcE_arcsec = xS0_E_arcsec + (dt_days / days_per_year) * muS_E_asyr
-    srcN_arcsec = xS0_N_arcsec + (dt_days / days_per_year) * muS_N_asyr
-    # Lens origin astrometry from BAGLE (arcsec East/North), if available
-    lensE_arcsec = lensN_arcsec = None
-    try:
-        if bagle_model is not None and hasattr(bagle_model, 'get_lens_origin_astrometry'):
-            lens_ast = bagle_model.get_lens_origin_astrometry(times_bjd, filt_idx=0)
-            lensE_arcsec = np.asarray(lens_ast[:, 1], dtype=float)  # ordering noted earlier as (N, E) vs (E, N); confirm
-            lensN_arcsec = np.asarray(lens_ast[:, 0], dtype=float)
-    except Exception:
-        lensE_arcsec = lensN_arcsec = None
+    lens_x = _gulls_series('centroid_x_lens1', 'centroid_x_lens1')
+    lens_y = _gulls_series('centroid_y_lens1', 'centroid_y_lens1')
+    source_shift_x = _gulls_series('centroid_x_source1', 'centroid_x_source1')
+    source_shift_y = _gulls_series('centroid_y_source1', 'centroid_y_source1')
+    source_shift_E = _gulls_series('centroid_E_source1_mas', 'centroid_E_source1_mas')
+    source_shift_N = _gulls_series('centroid_N_source1_mas', 'centroid_N_source1_mas')
+    sky_E = _gulls_series('centroid_E_sky_mas', 'centroid_E_sky_mas')
+    sky_N = _gulls_series('centroid_N_sky_mas', 'centroid_N_sky_mas')
 
-    # Add annual parallax for source to both centroid and source PM tracks (lens origin track includes parallax already)
-    try:
-        # Determine observer string from model
-        model_obs_loc = None
-        if bagle_model is not None and hasattr(bagle_model, 'obsLocation'):
-            ol = bagle_model.obsLocation
-            if isinstance(ol, str):
-                model_obs_loc = ol
-            elif isinstance(ol, (list, tuple)) and ol and isinstance(ol[0], str):
-                model_obs_loc = ol[0]
-        # Compute parallax vectors (East, North) via BAGLE helper
-        if model_obs_loc is None:
-            pvec = _bagle_parallax.parallax_in_direction(ra0, dec0, times_bjd)
-        else:
-            pvec = _bagle_parallax.parallax_in_direction(ra0, dec0, times_bjd, obsLocation=model_obs_loc)
-        # Source parallax amplitude in mas from distance (pc): piS_mas ≈ 1000/dS_pc
-        if 'dS' not in params:
-            raise RuntimeError("BAGLE validation: missing source distance dS (pc) in params")
-        dS_pc = float(params['dS'])
-        if not (np.isfinite(dS_pc) and dS_pc > 0):
-            raise RuntimeError(f"BAGLE validation: invalid source distance dS={dS_pc} (pc)")
-        piS_mas = 1000.0 / dS_pc
-        src_par_E_arcsec = (piS_mas * pvec[:, 0]) / 1e3
-        src_par_N_arcsec = (piS_mas * pvec[:, 1]) / 1e3
-        # Apply source parallax to centroid and source tracks
-        cenE_arcsec = cenE_arcsec + src_par_E_arcsec
-        cenN_arcsec = cenN_arcsec + src_par_N_arcsec
-    except Exception:
-        # If any issue, proceed without explicit parallax addition (centroid geometry still reflects parallax internally)
-        pass
+    lens_points = np.column_stack((lens_x, lens_y))
+    source_shift_xy = np.column_stack((source_shift_x, source_shift_y))
+    source_shift_ne = np.column_stack((source_shift_E, source_shift_N))
+    sky_points = np.column_stack((sky_E, sky_N))
 
-    # Plot BAGLE centroid apparent RA/Dec
-    cenRA_deg = ra0 + (cenE_arcsec / cosd) / 3600.0
-    cenDec_deg = dec0 + (cenN_arcsec / 3600.0)
-    ax9.plot(cenRA_deg, cenDec_deg, 'r-', label='BAGLE centroid RA/Dec', alpha=0.8)
-    # Overlay GULLS true centroid RA/Dec if present
-    try:
-        gulls_ra = np.asarray(gulls_data['true_centroid_ra_deg'], dtype=float)
-        gulls_dec = np.asarray(gulls_data['true_centroid_dec_deg'], dtype=float)
-        ax9.plot(gulls_ra, gulls_dec, 'b.', alpha=0.3, markersize=2, label='gulls centroid RA/Dec')
-    except Exception:
-        pass
-    # Plot source PM track as apparent RA/Dec
-    # Include source parallax in source track if computed
-    try:
-        srcE_arcsec = srcE_arcsec + src_par_E_arcsec
-        srcN_arcsec = srcN_arcsec + src_par_N_arcsec
-    except Exception:
-        pass
-    srcRA_deg = ra0 + (srcE_arcsec / cosd) / 3600.0
-    srcDec_deg = dec0 + (srcN_arcsec / 3600.0)
-    ax9.plot(srcRA_deg, srcDec_deg, color='gray', linestyle='--', alpha=0.7, label='source (PM+parallax)')
-    # Plot lens origin track as apparent RA/Dec if available
-    if lensE_arcsec is not None and lensN_arcsec is not None:
-        lensRA_deg = ra0 + (np.asarray(lensE_arcsec)/cosd)/3600.0
-        lensDec_deg = dec0 + (np.asarray(lensN_arcsec))/3600.0
-        ax9.plot(lensRA_deg, lensDec_deg, color='k', linestyle='--', alpha=0.7, label='lens origin RA/Dec')
-    ax9.set_xlabel('RA (deg)'); ax9.set_ylabel('Dec (deg)'); ax9.set_title('On-sky astrometry (apparent RA/Dec, geocentric) — anchored at event ra/dec (J2000)')
-    ax9.legend(); ax9.grid(alpha=0.3)
-    
-    # Compact header: include t0 variants when available
-    t0_hdr = f"t0={t0_used:.2f}"
-    if t0_orig is not None:
-        t0_hdr += f" | t0_orig={t0_orig:.2f}"
-    if (t0_mid is not None) and (abs(t0_mid - t0_used) > 1e-9):
-        t0_hdr += f" | t0_mid={t0_mid:.2f}"
-    if t_ref is not None and np.isfinite(t_ref):
-        t0_hdr += f" | tref={t_ref:.2f}"
+    source_path = None
+    if 'source_x' in gulls_data and 'source_y' in gulls_data:
+        try:
+            src_x = _gulls_series('source_x', 'source_x (lens frame)')
+            src_y = _gulls_series('source_y', 'source_y (lens frame)')
+            source_path = np.column_stack((src_x, src_y))
+        except RuntimeError:
+            source_path = None
 
-    plt.suptitle(f'{event_label} | {params["event_type"]} | {t0_hdr} MJD | ' +
-                 f'thetaE={params["thetaE"]:.3f} mas | q={params["mLs"]/params["mLp"]:.4f} | ' +
-                 f's={params["sep"]/params["thetaE"]:.3f} thetaE | rho={params["rho"]:.4f}\n' +
-                 '(Centroid curves are offsets relative to t0_used)', fontsize=12)
-    
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(output_file, dpi=150, bbox_inches='tight')
-    plt.close()
+    A_gulls = np.asarray(gulls_data['A_deblended'], dtype=float)
+    A_bagle = np.asarray(bagle_data['A'], dtype=float)
+    if A_gulls.shape != times.shape or A_bagle.shape != times.shape:
+        raise RuntimeError("Magnification arrays must match time axis for plotting.")
+    A_residual = A_gulls - A_bagle
+
+    sky_bagle = np.column_stack((bagle_data['sky_centroid_E_mas'], bagle_data['sky_centroid_N_mas']))
+    residual_E = sky_points[:, 0] - sky_bagle[:, 0]
+    residual_N = sky_points[:, 1] - sky_bagle[:, 1]
+
+    A_gulls = np.asarray(gulls_data['A_deblended'], dtype=float)
+    A_bagle = np.asarray(bagle_data['A'], dtype=float)
+    if A_gulls.shape != times.shape or A_bagle.shape != times.shape:
+        raise RuntimeError("Magnification arrays must match time axis for plotting.")
+    A_residual = A_gulls - A_bagle
+
+    residual_E = sky_relative_gulls[:, 0] - sky_relative_bagle[:, 0]
+    residual_N = sky_relative_gulls[:, 1] - sky_relative_bagle[:, 1]
+
+    cmap = plt.get_cmap('viridis')
+    norm = Normalize(vmin=times.min(), vmax=times.max())
+
+    fig = plt.figure(figsize=(14, 9))
+    gs = GridSpec(2, 2, figure=fig, height_ratios=[1.0, 1.15], hspace=0.35, wspace=0.3)
+
+    def _vector_base(arrays: List[np.ndarray | None]) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
+        data = [a for a in arrays if a is not None and np.size(a)]
+        if not data:
+            return np.zeros(2), 1.0, np.array([-1.0, -1.0]), np.array([1.0, 1.0])
+        stacked = np.vstack(data)
+        min_vals = np.nanmin(stacked, axis=0)
+        max_vals = np.nanmax(stacked, axis=0)
+        ranges = max_vals - min_vals
+        span = float(np.nanmax(ranges))
+        if not np.isfinite(span) or span <= 0.0:
+            span = max(np.linalg.norm(stacked[0]), 1.0)
+        base = (min_vals + max_vals) * 0.5
+        margin = 0.05 * span
+        bounds_min = min_vals - margin
+        bounds_max = max_vals + margin
+        return base, 0.2 * span, bounds_min, bounds_max
+
+    def _clamp_point(point: np.ndarray, bounds_min: np.ndarray, bounds_max: np.ndarray) -> np.ndarray:
+        return np.minimum(np.maximum(point, bounds_min), bounds_max)
+
+    def _shrink_to_bounds(base: np.ndarray, direction: np.ndarray, bounds_min: np.ndarray, bounds_max: np.ndarray) -> np.ndarray:
+        factor = 1.0
+        for dim in range(2):
+            comp = direction[dim]
+            if comp > 0:
+                allowed = bounds_max[dim] - base[dim]
+                if allowed <= 0:
+                    return np.zeros_like(direction)
+                factor = min(factor, allowed / comp)
+            elif comp < 0:
+                allowed = bounds_min[dim] - base[dim]
+                if allowed >= 0:
+                    return np.zeros_like(direction)
+                factor = min(factor, allowed / comp)
+        return direction * max(min(factor * 0.9, 1.0), 0.0)
+
+    def _draw_axes(ax, base, vectors, labels, colors, scale, bounds_min, bounds_max):
+        for vec, lab, color in zip(vectors, labels, colors):
+            if vec is None:
+                continue
+            norm = np.linalg.norm(vec)
+            if norm == 0 or not np.isfinite(norm):
+                continue
+            direction = (vec / norm) * scale
+            direction = _shrink_to_bounds(base, direction, bounds_min, bounds_max)
+            if not np.any(direction):
+                continue
+            end = base + direction
+            ax.annotate('', xy=end, xytext=base, arrowprops=dict(color=color, width=0.6, headwidth=5, alpha=0.8))
+            unit = direction / (np.linalg.norm(direction) + 1e-12)
+            perp = np.array([-unit[1], unit[0]])
+            label_offset = 0.04 * scale * unit + 0.02 * scale * perp
+            label_pos = _clamp_point(end + label_offset, bounds_min, bounds_max)
+            ax.text(*label_pos, lab, color=color, fontsize=8, weight='bold', ha='center', va='center')
+
+    ax_mag = fig.add_subplot(gs[0, 0])
+    ax_mag.plot(times, A_gulls, 'b.', markersize=2, alpha=0.6, label='GULLS')
+    ax_mag.plot(times, A_bagle, 'r-', linewidth=1.2, alpha=0.8, label='BAGLE')
+    ref_lines = [
+        (t0_used, 't0_used', 'k'),
+        (t0_orig, 't0_orig', 'purple'),
+        (t0_mid, 't0_mid', 'gray'),
+        (t_ref, 'tref', 'green'),
+    ]
+    for value, label, color in ref_lines:
+        if value is None or not np.isfinite(value):
+            continue
+        ax_mag.axvline(value, color=color, linestyle='--', alpha=0.45, linewidth=1.0, label=f"{label}={value:.2f}")
+    ax_mag.set_xlabel('Time (MJD)')
+    ax_mag.set_ylabel('Magnification A')
+    ax_mag.set_title(f'{event_label}: magnification comparison')
+    ax_mag.legend(fontsize=8)
+    ax_mag.grid(alpha=0.3)
+
+    ax_src = fig.add_subplot(gs[0, 1])
+    ax_src.scatter(
+        source_shift_ne[:, 0],
+        source_shift_ne[:, 1],
+        c=times,
+        cmap=cmap,
+        norm=norm,
+        s=18,
+        alpha=0.8,
+        label='GULLS shift (Roman/L2)',
+    )
+    # BAGLE source-rest overlay will be added here once BAGLE exports Roman/L2-aligned centroid shifts.
+    ax_src.axhline(0.0, color='gray', linestyle=':', linewidth=0.8)
+    ax_src.axvline(0.0, color='gray', linestyle=':', linewidth=0.8)
+    ax_src.set_xlabel('East shift (mas)')
+    ax_src.set_ylabel('North shift (mas)')
+    ax_src.set_title('Source-rest centroid shifts (L2-centric observer; source at origin)')
+    ax_src.axis('equal')
+    ax_src.grid(alpha=0.3)
+    ax_src.legend(fontsize=8)
+
+    ax_lens = fig.add_subplot(gs[1, 0])
+    ax_lens.scatter(
+        lens_points[:, 0],
+        lens_points[:, 1],
+        c=times,
+        cmap=cmap,
+        norm=norm,
+        s=18,
+        alpha=0.85,
+        label='GULLS centroid',
+    )
+    if source_path is not None:
+        ax_lens.plot(
+            source_path[:, 0],
+            source_path[:, 1],
+            color='gray',
+            linewidth=1.0,
+            alpha=0.7,
+            label='Source trajectory',
+        )
+    # BAGLE lens-frame centroid overlay will be drawn here once BAGLE provides lens1-referenced centroids.
+    lens1_x = float(np.asarray(gulls_data['lens1_x'], dtype=float)[0])
+    lens1_y = float(np.asarray(gulls_data['lens1_y'], dtype=float)[0])
+    lens2_x = float(np.asarray(gulls_data['lens2_x'], dtype=float)[0])
+    lens2_y = float(np.asarray(gulls_data['lens2_y'], dtype=float)[0])
+    ax_lens.scatter([lens1_x], [lens1_y], marker='s', color='k', s=35, label='Lens 1')
+    ax_lens.scatter([lens2_x], [lens2_y], marker='s', facecolors='none', edgecolors='k', s=35, label='Lens 2')
+    ax_lens.set_xlabel('x (Einstein radii)')
+    ax_lens.set_ylabel('y (Einstein radii)')
+    ax_lens.set_title('Lens-plane centroids (lens rest frame; \nL2-centric, origin at lens1 position, x-axis along lens axis)')
+    ax_lens.axis('equal')
+    ax_lens.grid(alpha=0.3)
+    ax_lens.legend(fontsize=8)
+
+    base_lens, scale_lens, bounds_min_lens, bounds_max_lens = _vector_base(
+        [lens_points, source_path]
+    )
+    north_vec_lens = rotation_ne_to_xy @ np.array([1.0, 0.0])
+    east_vec_lens = rotation_ne_to_xy @ np.array([0.0, 1.0])
+    _draw_axes(
+        ax_lens,
+        base_lens,
+        [east_vec_lens, north_vec_lens],
+        ['E', 'N'],
+        ['tab:orange', 'tab:green'],
+        scale_lens,
+        bounds_min_lens,
+        bounds_max_lens,
+    )
+
+    ax_sky = fig.add_subplot(gs[1, 1])
+    ax_sky.scatter(
+        sky_points[:, 0],
+        sky_points[:, 1],
+        c=times,
+        cmap=cmap,
+        norm=norm,
+        s=18,
+        alpha=0.85,
+        label='GULLS centroid',
+    )
+    # BAGLE sky-centroid overlay will be added here when BAGLE emits the Roman/L2 sky track.
+    ax_sky.axhline(0.0, color='gray', linestyle=':', alpha=0.4, linewidth=0.9)
+    ax_sky.axvline(0.0, color='gray', linestyle=':', alpha=0.4, linewidth=0.9)
+    ax_sky.set_xlabel('East offset (mas)')
+    ax_sky.set_ylabel('North offset (mas)')
+    ax_sky.set_title('Sky centroids (L2-centric sky rest frame; origin fixed at lens1 RA/Dec at t=t0lens1)')
+    ax_sky.axis('equal')
+    ax_sky.grid(alpha=0.3)
+    ax_sky.legend(fontsize=8)
+
+    rot_inv = np.linalg.inv(rotation_ne_to_xy)
+    base_sky, scale_sky, bounds_min_sky, bounds_max_sky = _vector_base([sky_points, None])
+    lens_x_ne = rot_inv @ np.array([1.0, 0.0])
+    lens_y_ne = rot_inv @ np.array([0.0, 1.0])
+    # Convert (N,E) ordering to (E,N)
+    lens_x_en = np.array([lens_x_ne[1], lens_x_ne[0]])
+    lens_y_en = np.array([lens_y_ne[1], lens_y_ne[0]])
+    _draw_axes(
+        ax_sky,
+        base_sky,
+        [lens_x_en, lens_y_en],
+        ['x', 'y'],
+        ['tab:purple', 'tab:brown'],
+        scale_sky,
+        bounds_min_sky,
+        bounds_max_sky,
+    )
+
+    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=[ax_lens, ax_sky], fraction=0.046, pad=0.04)
+    cbar.set_label('Time (MJD)')
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.suptitle(event_label, fontsize=14)
+    fig.savefig(output_file, dpi=150, bbox_inches='tight')
+    plt.close(fig)
 
 def validate_event(out_file, lc_file, simulation_zero_time, multiple_sources, params_dict: Optional[Dict[str, str]] = None, verbose=True):
     # Fail-fast top-level: do NOT swallow exceptions here. Upstream runner should treat failures as failures.
@@ -1325,28 +1186,23 @@ def validate_event(out_file, lc_file, simulation_zero_time, multiple_sources, pa
     # Timescale diagnostic (explicit receipt): Compare TDB vs TT for a small sample to
     # confirm we are operating within expected sub-millisecond modulation (TT-TDB periodic ~1.6 ms).
     # We do not adjust times; only record amplitude. If amplitude exceeds 5 ms, raise to force review.
-    try:
-        if times_bjd.size >= 3:
-            import astropy.time as _at
-            sample = times_bjd[::max(1, times_bjd.size // 5)]  # up to 5 samples
-            t_tdb = _at.Time(sample, format='mjd', scale='tdb')
-            t_tt  = _at.Time(sample, format='mjd', scale='tt')
-            # Difference in seconds
-            dt_sec = (t_tt.tdb.jd - t_tt.tt.jd) * 86400.0  # Using tt object for consistent base
-            max_dt = float(np.max(np.abs(dt_sec)))
-            avg_dt = float(np.mean(dt_sec))
-            bagle_params['__timescale_diag__'] = {
-                'sample_size': int(sample.size),
-                'max_|TT-TDB|_sec': max_dt,
-                'mean_(TT-TDB)_sec': avg_dt
-            }
-            if max_dt > 0.005:  # >5 ms threshold — larger than expected astrophysical correction amplitude
-                raise RuntimeError(f"TT-TDB delta {max_dt:.4f}s exceeds 5 ms threshold; verify emitted BJD scale")
-            if verbose:
-                print(f"    TimeScaleDiag: max|TT-TDB|={max_dt*1e3:.3f} ms mean={avg_dt*1e3:.3f} ms (receipt only)")
-    except Exception as _ts_ex:
-        # Fail-fast philosophy: escalate if we cannot perform the diagnostic
-        raise RuntimeError(f"Timescale diagnostic failed: {_ts_ex}") from _ts_ex
+    if times_bjd.size >= 3:
+        import astropy.time as _at
+        sample = times_bjd[::max(1, times_bjd.size // 5)]  # up to 5 samples
+        t_tdb = _at.Time(sample, format='mjd', scale='tdb')
+        t_tt = _at.Time(sample, format='mjd', scale='tt')
+        dt_sec = (t_tt.tdb.jd - t_tt.tt.jd) * 86400.0
+        max_dt = float(np.max(np.abs(dt_sec)))
+        avg_dt = float(np.mean(dt_sec))
+        bagle_params['__timescale_diag__'] = {
+            'sample_size': int(sample.size),
+            'max_|TT-TDB|_sec': max_dt,
+            'mean_(TT-TDB)_sec': avg_dt
+        }
+        if max_dt > 0.005:
+            raise RuntimeError(f"TT-TDB delta {max_dt:.4f}s exceeds 5 ms threshold; verify emitted BJD scale")
+        if verbose:
+            print(f"    TimeScaleDiag: max|TT-TDB|={max_dt*1e3:.3f} ms mean={avg_dt*1e3:.3f} ms (receipt only)")
     use_parallax = parallax_enabled
     bagle_model = create_bagle_model(bagle_params, event_type, use_parallax)
     # --- Observer: deterministically resolve from GULLS params and apply to BAGLE ---
@@ -1356,24 +1212,20 @@ def validate_event(out_file, lc_file, simulation_zero_time, multiple_sources, pa
     if verbose:
         print(f"    ObserverReceipt: obsLocation='{used_obs}' source=Horizons file={obs_receipt['gulls_obs_file']}")
     # Receipt: print the exact time range that will be sent to Horizons (if a spacecraft is used)
-    try:
+    min_time_mjd = float(np.min(times_bjd)) 
+    max_time_mjd = float(np.max(times_bjd))
+    if used_obs == '-211':
         import astropy.time as _at
-        min_time_mjd = float(np.min(times_bjd)) if times_bjd.size else float('nan')
-        max_time_mjd = float(np.max(times_bjd)) if times_bjd.size else float('nan')
-        if used_obs == '-211':
-            bd_mjd = _EARLIEST_ROMAN_MJD
-            t_min_iso = _at.Time(min_time_mjd, format='mjd', scale='tdb').iso if np.isfinite(min_time_mjd) else 'nan'
-            t_max_iso = _at.Time(max_time_mjd, format='mjd', scale='tdb').iso if np.isfinite(max_time_mjd) else 'nan'
-            t_bd_iso  = _at.Time(bd_mjd,      format='mjd', scale='tdb').iso
-            print(
-                "    HorizonsQuery: target='-211' (Roman)\n"
-                f"      min_MJD_TDB={min_time_mjd:.6f}  min_JD_TDB={min_time_mjd + 2400000.5:.6f}  min_ISO_TDB={t_min_iso}\n"
-                f"      max_MJD_TDB={max_time_mjd:.6f}  max_JD_TDB={max_time_mjd + 2400000.5:.6f}  max_ISO_TDB={t_max_iso}\n"
-                f"      earliest_supported_MJD_TDB={bd_mjd:.6f}  earliest_ISO_TDB={t_bd_iso}  (guard +0.05 d applies)"
-            )
-    except Exception as _print_ex:
-        if verbose:
-            print(f"    HorizonsQuery: failed to format time receipts: {_print_ex}")
+        bd_mjd = _EARLIEST_ROMAN_MJD
+        t_min_iso = _at.Time(min_time_mjd, format='mjd', scale='tdb').iso if np.isfinite(min_time_mjd) else 'nan'
+        t_max_iso = _at.Time(max_time_mjd, format='mjd', scale='tdb').iso if np.isfinite(max_time_mjd) else 'nan'
+        t_bd_iso = _at.Time(bd_mjd, format='mjd', scale='tdb').iso
+        print(
+            "    HorizonsQuery: target='-211' (Roman)\n"
+            f"      min_MJD_TDB={min_time_mjd:.6f}  min_JD_TDB={min_time_mjd + 2400000.5:.6f}  min_ISO_TDB={t_min_iso}\n"
+            f"      max_MJD_TDB={max_time_mjd:.6f}  max_JD_TDB={max_time_mjd + 2400000.5:.6f}  max_ISO_TDB={t_max_iso}\n"
+            f"      earliest_supported_MJD_TDB={bd_mjd:.6f}  earliest_ISO_TDB={t_bd_iso}  (guard +0.05 d applies)"
+        )
     # Pre-flight Roman ephemeris boundary guard: fail with explicit receipt before network call if times begin too close
     # to the published lower boundary (Horizons error can be cryptic when off by minutes). We require a 0.05-day safety margin.
     if used_obs == '-211':
@@ -1389,68 +1241,66 @@ def validate_event(out_file, lc_file, simulation_zero_time, multiple_sources, pa
     #   t0_geo ≈ t0_mid - tE * tshift(t0_mid).
     # We approximate tshift from BAGLE's parallax vector pvec(E,N) by constructing N/E shifts relative to tref
     # with linear term removed, then projecting onto the mu_rel direction (phi_v).
-    try:
-        if use_parallax:
-            t0_mid = bagle_params.get('t0_midpoint', bagle_params.get('t0'))
-            t_ref = bagle_params.get('t_ref_mjd')
-            tE_days = bagle_params.get('tE_days')
-            piE_amp = bagle_params.get('piE')
-            if all(np.isfinite(x) for x in [t0_mid, t_ref, tE_days, piE_amp]):
-                # Compute parallax vectors at t0_mid, tref, and derivative near tref
-                dt = 0.5  # days for finite difference
-                t_arr = np.array([t0_mid, t_ref - dt, t_ref, t_ref + dt], dtype=float)
-                pvec = _bagle_parallax.parallax_in_direction(bagle_params['raL'], bagle_params['decL'], t_arr, obsLocation=used_obs)
-                # Columns: (East, North). Extract by index for clarity.
-                E_t0, N_t0 = float(pvec[0, 0]), float(pvec[0, 1])
-                E_m,  N_m  = float(pvec[1, 0]), float(pvec[1, 1])
-                E_ref, N_ref = float(pvec[2, 0]), float(pvec[2, 1])
-                E_p,  N_p  = float(pvec[3, 0]), float(pvec[3, 1])
-                # Finite-difference derivative at tref
-                dE_dt = (E_p - E_m) / (2*dt)
-                dN_dt = (N_p - N_m) / (2*dt)
-                # NE shift relative to reference, with linear term removed
-                dt_rel = float(t0_mid - t_ref)
-                Eshift = (E_t0 - E_ref) - dt_rel * dE_dt
-                Nshift = (N_t0 - N_ref) - dt_rel * dN_dt
-                # Project onto trajectory direction using mu_rel angle (approx phi_pi)
-                mu_rel_E = bagle_params['muS_E'] - bagle_params['muL_E']
-                mu_rel_N = bagle_params['muS_N'] - bagle_params['muL_N']
-                phi_v = float(np.arctan2(mu_rel_E, mu_rel_N))  # radians
-                cs = np.cos(phi_v); sn = np.sin(phi_v)
-                tshift = -piE_amp * (Nshift*cs + Eshift*sn)
-                # Recenter t0
-                t0_geo = float(t0_mid - tE_days * tshift)
-                # Persist diagnostics and apply
-                bagle_params['t0_geocentric'] = t0_geo
-                bagle_params['__geo_reparam__'] = {
-                    'dt_days': dt,
-                    'Eshift': Eshift,
-                    'Nshift': Nshift,
-                    'dE_dt': dE_dt,
-                    'dN_dt': dN_dt,
-                    'phi_v_deg': float(np.degrees(phi_v)),
-                    'tshift_at_t0': float(tshift),
-                    't0_mid_MJD': float(t0_mid),
-                    't_ref_MJD': float(t_ref),
-                    't0_geo_MJD': t0_geo,
-                }
-                # Update working t0 in both params and model
-                bagle_params['t0'] = t0_geo
-                try:
-                    bagle_model.t0 = t0_geo
-                except Exception:
-                    # If attribute assignment fails (unlikely), we'll rebuild the model below if needed.
-                    pass
-                if verbose:
-                    ore = bagle_params.get('__origin_reparam__', {})
-                    dt0_origin = (ore.get('t0_midpoint_MJD') - ore.get('t0_original_MJD')) if ore else np.nan
-                    dt0_geo = t0_geo - (t0_mid if np.isfinite(t0_mid) else np.nan)
-                    print("    GeoReparam:" +
-                          f" tshift(t0)={tshift:.4g}  dE_dt={dE_dt:.3e} dN_dt={dN_dt:.3e} AU/day" +
-                          f" | Δt0_origin={dt0_origin:.3g} d from COM→midpoint, Δt0_geo={dt0_geo:.3g} d from midpoint→geo")
-    except Exception as _geo_ex:
+    if use_parallax:
+        t0_mid = float(bagle_params['t0_midpoint'])
+        t_ref = float(bagle_params['t_ref_mjd'])
+        tE_days = float(bagle_params['tE_days'])
+        piE_amp = float(bagle_params['piE'])
+        for label, value in (
+            ('t0_midpoint', t0_mid),
+            ('t_ref_mjd', t_ref),
+            ('tE_days', tE_days),
+            ('piE', piE_amp),
+        ):
+            if not np.isfinite(value):
+                raise RuntimeError(f"GeoReparam requires finite {label}; got {value}")
+        if tE_days <= 0:
+            raise RuntimeError(f"GeoReparam requires positive tE_days; got {tE_days}")
+        dt = 0.5
+        t_arr = np.array([t0_mid, t_ref - dt, t_ref, t_ref + dt], dtype=float)
+        pvec = _bagle_parallax.parallax_in_direction(bagle_params['raL'], bagle_params['decL'], t_arr, obsLocation=used_obs)
+        E_t0, N_t0 = float(pvec[0, 0]), float(pvec[0, 1])
+        E_m, N_m = float(pvec[1, 0]), float(pvec[1, 1])
+        E_ref, N_ref = float(pvec[2, 0]), float(pvec[2, 1])
+        E_p, N_p = float(pvec[3, 0]), float(pvec[3, 1])
+        dE_dt = (E_p - E_m) / (2 * dt)
+        dN_dt = (N_p - N_m) / (2 * dt)
+        dt_rel = float(t0_mid - t_ref)
+        Eshift = (E_t0 - E_ref) - dt_rel * dE_dt
+        Nshift = (N_t0 - N_ref) - dt_rel * dN_dt
+        mu_rel_E = bagle_params['muS_E'] - bagle_params['muL_E']
+        mu_rel_N = bagle_params['muS_N'] - bagle_params['muL_N']
+        phi_v = float(np.arctan2(mu_rel_E, mu_rel_N))
+        cs = np.cos(phi_v)
+        sn = np.sin(phi_v)
+        tshift = -piE_amp * (Nshift * cs + Eshift * sn)
+        t0_geo = float(t0_mid - tE_days * tshift)
+        bagle_params['t0_geocentric'] = t0_geo
+        bagle_params['__geo_reparam__'] = {
+            'dt_days': dt,
+            'Eshift': Eshift,
+            'Nshift': Nshift,
+            'dE_dt': dE_dt,
+            'dN_dt': dN_dt,
+            'phi_v_deg': float(np.degrees(phi_v)),
+            'tshift_at_t0': float(tshift),
+            't0_mid_MJD': float(t0_mid),
+            't_ref_MJD': float(t_ref),
+            't0_geo_MJD': t0_geo,
+        }
+        bagle_params['t0'] = t0_geo
+        bagle_model.t0 = t0_geo
         if verbose:
-            print(f"    GeoReparam skipped: {type(_geo_ex).__name__}: {_geo_ex}")
+            if '__origin_reparam__' not in bagle_params:
+                raise RuntimeError("Origin reparameterization receipt missing prior to GeoReparam log.")
+            ore = bagle_params['__origin_reparam__']
+            dt0_origin = ore['t0_midpoint_MJD'] - ore['t0_original_MJD']
+            dt0_geo = t0_geo - t0_mid
+            print(
+                "    GeoReparam:"
+                f" tshift(t0)={tshift:.4g}  dE_dt={dE_dt:.3e} dN_dt={dN_dt:.3e} AU/day"
+                f" | Δt0_origin={dt0_origin:.3g} d from COM→midpoint, Δt0_geo={dt0_geo:.3g} d from midpoint→geo"
+            )
     if parallax_enabled and 't0_geocentric' not in bagle_params:
         raise RuntimeError("Geocentric reparameterization missing while parallax enabled")
 
@@ -1512,42 +1362,26 @@ def validate_event(out_file, lc_file, simulation_zero_time, multiple_sources, pa
     # Parallax alignment audit (fail-fast) if parallax active.
     parallax_diag: Optional[Dict[str, Any]] = None
     if use_parallax:
-        try:
-            parallax_diag = audit_parallax_alignment(
-                ra_deg=bagle_params['raL'], dec_deg=bagle_params['decL'],
-                times_mjd=times_bjd, bagle_model=bagle_model, obs_location=used_obs
+        parallax_diag = audit_parallax_alignment(
+            ra_deg=bagle_params['raL'], dec_deg=bagle_params['decL'],
+            times_mjd=times_bjd, bagle_model=bagle_model, obs_location=used_obs
+        )
+        if verbose:
+            print(
+                "    ParallaxAudit: median_rel_err={:.3g} max_rel_err={:.3g} component_max_diff_mas={:.3g}".format(
+                    parallax_diag['median_rel_err'], parallax_diag['max_rel_err'], parallax_diag['component_abs_max_diff_mas']
+                )
             )
-            if verbose:
-                print("    ParallaxAudit: median_rel_err={:.3g} max_rel_err={:.3g} component_max_diff_mas={:.3g}".format(
-                    parallax_diag['median_rel_err'], parallax_diag['max_rel_err'], parallax_diag['component_abs_max_diff_mas']))
-            # Additional timescale sensitivity (optional receipt): quantify effect on parallax if TT were fed as TDB.
-            try:
-                import astropy.time as _at
-                # Sample a few points for speed
-                sample_idx = np.linspace(0, times_bjd.size - 1, num=min(8, times_bjd.size), dtype=int)
-                t_samp = times_bjd[sample_idx]
-                t_tt = _at.Time(t_samp, format='mjd', scale='tt')
-                dt_days = (t_tt.tdb.jd - t_tt.tt.jd)  # TDB - TT in days
-                # Minimal observer debug (requested): just echo the observer string actually being passed.
-                # (debug removed)
-                p_t = _bagle_parallax.parallax_in_direction(bagle_params['raL'], bagle_params['decL'], t_samp, obsLocation=used_obs)
-                # (debug removed)
-                p_t_plus = _bagle_parallax.parallax_in_direction(bagle_params['raL'], bagle_params['decL'], t_samp + dt_days, obsLocation=used_obs)
-                dp = (p_t_plus - p_t)
-                # Determine piL (mas)
-                piL_mas = getattr(bagle_model, 'piL', None)
-                if (piL_mas is None) and hasattr(bagle_model, 'dL') and np.isfinite(bagle_model.dL) and bagle_model.dL > 0:
-                    piL_mas = 1000.0 / float(bagle_model.dL)
-                if piL_mas is not None and np.isfinite(piL_mas):
-                    dmas = np.hypot(*(piL_mas * dp).T)  # mas
-                    max_dmas = float(np.max(np.abs(dmas))) if dmas.size else 0.0
-                    print(f"    TimeScaleDiag(parallax): max|Δparallax|≈{max_dmas*1e3:.3f} μas if TT misfed as TDB")
-            except Exception as _pdiag_ex:
-                print(f"    TimeScaleDiag(parallax) skipped: {_pdiag_ex}")
-        except Exception as e_audit:
-            # Fail-fast with context; produce audit failure receipt.
-            print(f"    Parallax audit failed: {type(e_audit).__name__}: {e_audit}")
-            raise
+        import astropy.time as _at
+        t_tt = _at.Time(times_bjd, format='mjd', scale='tt')
+        dt_days = (t_tt.tdb.jd - t_tt.tt.jd)
+        p_t = _bagle_parallax.parallax_in_direction(bagle_params['raL'], bagle_params['decL'], times_bjd, obsLocation=used_obs)
+        p_t_plus = _bagle_parallax.parallax_in_direction(bagle_params['raL'], bagle_params['decL'], times_bjd + dt_days, obsLocation=used_obs)
+        dp = (p_t_plus - p_t)
+        piL_mas = getattr(bagle_model, 'piL')
+        dmas = np.hypot(*(piL_mas * dp).T)
+        max_dmas = float(np.max(np.abs(dmas)))
+        print(f"    TimeScaleDiag(parallax): max|Δparallax|≈{max_dmas*1e3:.3f} μas if TT misfed as TDB")
     # Parallax components (piEN, piEE) are ignored for Param1; no informational print needed.
     try:
         bagle_data = compute_bagle_predictions(bagle_model, times_bjd, bagle_params)
@@ -1558,20 +1392,14 @@ def validate_event(out_file, lc_file, simulation_zero_time, multiple_sources, pa
             idx = int(np.argmin(np.abs(times_bjd - t0)))
             t_slice = times_bjd[max(0, idx-3): min(len(times_bjd), idx+4)]
             print(f"    BAGLE compute failed near t0. Times around t0 (MJD): {t_slice}")
+        else:
+            print("    BAGLE compute failed but cannot determine t0 or times for diagnostics.")
+        print(f"    Exception: {e_compute.__class__.__name__}: {e_compute}")
         print("    Re-raising with context. Params summary above.")
         raise
-    # --- Magnification deblending ---
-    # Compute deblended magnification from header fs if not already present.
-    if 'fs' not in lc_meta or not np.isfinite(lc_meta['fs']):
-        raise RuntimeError("Lightcurve header missing finite fs; cannot deblend magnification.")
-    fs = float(lc_meta['fs'])
-    if fs <= 0 or fs > 1:
-        raise RuntimeError(f"Invalid fs in header: {fs}. Expected 0 < fs ≤ 1.")
-    F_total = gulls_data['true_relative_flux']
-    F_blend = 1.0 - fs
-    A_gulls = (F_total - F_blend) / fs
-    gulls_data['A_deblended'] = A_gulls
-    A_diff = A_gulls - bagle_data['A']
+    
+    gulls_data['A_deblended'] = calculate_magnification_from_lightcurve(lc_meta, gulls_data)
+    A_diff = gulls_data['A_deblended'] - bagle_data['A']
 
     # Persist a compact sidecar with BAGLE arrays for downstream overlays (plots).
     # Explicit ordering: BAGLE returns centroid shifts as (East, North) per bagle.parallax.parallax_in_direction docstrings.
@@ -1601,20 +1429,16 @@ def validate_event(out_file, lc_file, simulation_zero_time, multiple_sources, pa
     np.savez(sidecar_path, **sidecar)
     # --- Astrometry comparison ---
     # Lens-frame consistency (relative to source position in Einstein radii)
-    required_cols = ("true_x_centroid", "true_y_centroid", "source_x", "source_y")
-    for key in required_cols:
-        if key not in gulls_data:
-            raise RuntimeError(f"Lightcurve missing required column '{key}' for lens-frame validation.")
-    gulls_true_x = np.asarray(gulls_data['true_x_centroid'], dtype=float)
-    gulls_true_y = np.asarray(gulls_data['true_y_centroid'], dtype=float)
-    gulls_src_x = np.asarray(gulls_data['source_x'], dtype=float)
-    gulls_src_y = np.asarray(gulls_data['source_y'], dtype=float)
+    lens_true_x = _require_series(gulls_data, 'centroid_x_lens1', 'centroid_x_lens1')
+    lens_true_y = _require_series(gulls_data, 'centroid_y_lens1', 'centroid_y_lens1')
+    gulls_rel_x = _require_series(gulls_data, 'centroid_x_source1', 'centroid_x_source1')
+    gulls_rel_y = _require_series(gulls_data, 'centroid_y_source1', 'centroid_y_source1')
     bagle_rel_x = np.asarray(bagle_data.get('lens_rel_x', []), dtype=float)
     bagle_rel_y = np.asarray(bagle_data.get('lens_rel_y', []), dtype=float)
-    if not (gulls_true_x.size == gulls_src_x.size == bagle_rel_x.size == len(times_bjd)):
+    if not (lens_true_x.size == gulls_rel_x.size == bagle_rel_x.size == len(times_bjd)):
         raise RuntimeError("Lens-frame arrays length mismatch between GULLS and BAGLE predictions.")
-    gulls_rel_x = gulls_true_x - gulls_src_x
-    gulls_rel_y = gulls_true_y - gulls_src_y
+    gulls_data['true_x_centroid'] = lens_true_x
+    gulls_data['true_y_centroid'] = lens_true_y
     gulls_data['lens_rel_x'] = gulls_rel_x
     gulls_data['lens_rel_y'] = gulls_rel_y
 
@@ -1622,18 +1446,21 @@ def validate_event(out_file, lc_file, simulation_zero_time, multiple_sources, pa
     lens_rel_diff_y = gulls_rel_y - bagle_rel_y
     lens_rel_rms = float(np.sqrt(np.mean(lens_rel_diff_x**2 + lens_rel_diff_y**2)))
 
-    # Sky-plane NE comparison (mas) reconstructed from RA/Dec
-    gulls_sky_centroid_N_mas, gulls_sky_centroid_E_mas = _derive_gulls_sky_centroid_ne(gulls_data, bagle_params)
-    bagle_sky_centroid_N_mas = np.asarray(bagle_data.get('sky_centroid_N_mas', []), dtype=float)
-    bagle_sky_centroid_E_mas = np.asarray(bagle_data.get('sky_centroid_E_mas', []), dtype=float)
-    if not (bagle_sky_centroid_N_mas.size == bagle_sky_centroid_E_mas.size == gulls_sky_centroid_N_mas.size == len(times_bjd)):
+    # Sky-plane NE comparison (mas) using direct L2-centric outputs
+    gulls_sky_centroid_E_mas = _require_series(gulls_data, 'centroid_E_sky_mas', 'centroid_E_sky_mas')
+    gulls_sky_centroid_N_mas = _require_series(gulls_data, 'centroid_N_sky_mas', 'centroid_N_sky_mas')
+    bagle_sky_centroid_N_mas = np.asarray(
+        bagle_data['sky_centroid_N_mas'], dtype=float)
+    bagle_sky_centroid_E_mas = np.asarray(
+        bagle_data['sky_centroid_E_mas'], dtype=float)
+    if (bagle_sky_centroid_N_mas.size != bagle_sky_centroid_E_mas.size or
+            bagle_sky_centroid_N_mas.size != len(times_bjd)):
         raise RuntimeError("Sky-plane astrometry arrays length mismatch between GULLS and BAGLE predictions.")
 
-    # Record absolute sky centroids for downstream plots/diagnostics
-    bagle_data['sky_centroid_N_mas'] = bagle_sky_centroid_N_mas
-    bagle_data['sky_centroid_E_mas'] = bagle_sky_centroid_E_mas
     gulls_data['sky_centroid_N_mas'] = gulls_sky_centroid_N_mas
     gulls_data['sky_centroid_E_mas'] = gulls_sky_centroid_E_mas
+    gulls_data['true_N_centroid_mas'] = gulls_sky_centroid_N_mas
+    gulls_data['true_E_centroid_mas'] = gulls_sky_centroid_E_mas
 
     N_diff = gulls_sky_centroid_N_mas - bagle_sky_centroid_N_mas
     E_diff = gulls_sky_centroid_E_mas - bagle_sky_centroid_E_mas
@@ -1671,12 +1498,13 @@ def validate_event(out_file, lc_file, simulation_zero_time, multiple_sources, pa
     # 4. Peak time lag |Δt_peak| must be ≤ 2 days (receipt: light curve generated spans hundreds of days; larger offsets suggest time origin mismatch).
     # NOTE: We no longer fail purely because FSBL is unavailable; physical mismatch must be expressed in metrics.
     thetaE_mas = bagle_params['thetaE']
-    A_corr = np.nan
-    if A_gulls.size == bagle_data['A'].size and A_gulls.size > 1:
-        try:
-            A_corr = float(np.corrcoef(A_gulls, bagle_data['A'])[0, 1])
-        except Exception:
-            A_corr = np.nan
+    if A_gulls.size != bagle_data['A'].size:
+        raise RuntimeError(
+            f"Magnification array length mismatch: GULLS={A_gulls.size} BAGLE={bagle_data['A'].size}"
+        )
+    if A_gulls.size <= 1:
+        raise RuntimeError("Magnification arrays must contain more than one sample to compute correlation.")
+    A_corr = float(np.corrcoef(A_gulls, bagle_data['A'])[0, 1])
     fail_reasons = []
     if results['A_rms'] > 0.5:
         fail_reasons.append(f"Magnification RMS {results['A_rms']:.3g} > 0.5 threshold")
@@ -1695,34 +1523,24 @@ def validate_event(out_file, lc_file, simulation_zero_time, multiple_sources, pa
         fail_reasons.append(
             f"Lens-frame centroid RMS {results['lens_frame_rms']:.3g} ER > {lens_rel_threshold:.3g} ER threshold"
         )
-    # Peak time lag check
-    try:
-        t_peak_gulls = float(times_bjd[np.argmax(A_gulls)])
-        t_peak_bagle = float(times_bjd[np.argmax(bagle_data['A'])])
-        peak_lag = abs(t_peak_gulls - t_peak_bagle)
-        if peak_lag > 0.1:
-            fail_reasons.append(f"Peak time lag {peak_lag:.3f} days > 0.1 day threshold")
-    except Exception as _ex:
-        fail_reasons.append("Peak time lag computation failed")
+    t_peak_gulls = float(times_bjd[np.argmax(A_gulls)])
+    t_peak_bagle = float(times_bjd[np.argmax(bagle_data['A'])])
+    peak_lag = abs(t_peak_gulls - t_peak_bagle)
+    if peak_lag > 0.1:
+        fail_reasons.append(f"Peak time lag {peak_lag:.3f} days > 0.1 day threshold")
 
     if fail_reasons:
         # Augment diagnostics specifically for peak lag to expose motion vectors.
         if any('Peak time lag' in r for r in fail_reasons):
-            try:
-                # Compute relative proper motion amplitude and direction receipts.
-                mu_rel_E = bagle_params['muS_E'] - bagle_params['muL_E']
-                mu_rel_N = bagle_params['muS_N'] - bagle_params['muL_N']
-                mu_rel_amp = np.hypot(mu_rel_E, mu_rel_N)
-                mu_rel_posang_deg = (np.degrees(np.arctan2(mu_rel_E, mu_rel_N)) % 360.0)
-                # Parallax scalar
-                piE_scalar = bagle_params.get('piE')
-                # Record context
-                print(f"    PeakLagContext: mu_rel_amp={mu_rel_amp:.3g} mas/yr posAng(mu_rel)={mu_rel_posang_deg:.2f} deg piE={piE_scalar:.3g}")
-                if 'parallax_diag' in results:
-                    pd = results['parallax_diag']
-                    print(f"    ParallaxDiag: piL={pd.get('piL_mas')} mas median_rel_err={pd.get('median_rel_err'):.3g}")
-            except Exception as _ctx_ex:
-                print(f"    PeakLagContext: failed to compute extra diagnostics: {type(_ctx_ex).__name__}: {_ctx_ex}")
+            mu_rel_E = bagle_params['muS_E'] - bagle_params['muL_E']
+            mu_rel_N = bagle_params['muS_N'] - bagle_params['muL_N']
+            mu_rel_amp = np.hypot(mu_rel_E, mu_rel_N)
+            mu_rel_posang_deg = (np.degrees(np.arctan2(mu_rel_E, mu_rel_N)) % 360.0)
+            piE_scalar = bagle_params['piE']
+            print(f"    PeakLagContext: mu_rel_amp={mu_rel_amp:.3g} mas/yr posAng(mu_rel)={mu_rel_posang_deg:.2f} deg piE={piE_scalar:.3g}")
+            if 'parallax_diag' in results:
+                pd = results['parallax_diag']
+                print(f"    ParallaxDiag: piL={pd.get('piL_mas')} mas median_rel_err={pd.get('median_rel_err'):.3g}")
         # Provide structured context and do NOT produce a success plot; still emit a diagnostic plot for debugging.
         if verbose:
             print("    VALIDATION FAILURE: criteria unmet")
@@ -1731,39 +1549,36 @@ def validate_event(out_file, lc_file, simulation_zero_time, multiple_sources, pa
         # Persist a detailed diagnostics sidecar for post-mortem analysis. This file records
         # per-epoch quantities (times, gulls true centroids, BAGLE sky centroids and shifts)
         # and reparameterization receipts so we can trace mismatches without altering BAGLE outputs.
-        try:
-            diag = {
-                'times_mjd': times_bjd.astype(float),
-                'gulls_true_N_mas': gulls_data.get('true_N_centroid_mas', np.full_like(times_bjd, np.nan)),
-                'gulls_true_E_mas': gulls_data.get('true_E_centroid_mas', np.full_like(times_bjd, np.nan)),
-                'gulls_true_x_ER': gulls_data.get('true_x_centroid', np.full_like(times_bjd, np.nan)),
-                'gulls_true_y_ER': gulls_data.get('true_y_centroid', np.full_like(times_bjd, np.nan)),
-                'gulls_src_x_ER': gulls_data.get('source_x', np.full_like(times_bjd, np.nan)),
-                'gulls_src_y_ER': gulls_data.get('source_y', np.full_like(times_bjd, np.nan)),
-                'gulls_sky_centroid_N_mas': gulls_data.get('sky_centroid_N_mas', np.full_like(times_bjd, np.nan)),
-                'gulls_sky_centroid_E_mas': gulls_data.get('sky_centroid_E_mas', np.full_like(times_bjd, np.nan)),
-                'gulls_lens_rel_x_ER': gulls_data.get('lens_rel_x', np.full_like(times_bjd, np.nan)),
-                'gulls_lens_rel_y_ER': gulls_data.get('lens_rel_y', np.full_like(times_bjd, np.nan)),
-                'bagle_shift_E_mas': np.asarray(bagle_data.get('shift_E', np.full_like(times_bjd, np.nan)), dtype=float),
-                'bagle_shift_N_mas': np.asarray(bagle_data.get('shift_N', np.full_like(times_bjd, np.nan)), dtype=float),
-                'bagle_sky_centroid_E_mas': np.asarray(bagle_data.get('sky_centroid_E_mas', np.full_like(times_bjd, np.nan)), dtype=float),
-                'bagle_sky_centroid_N_mas': np.asarray(bagle_data.get('sky_centroid_N_mas', np.full_like(times_bjd, np.nan)), dtype=float),
-                'bagle_lens_rel_x_ER': np.asarray(bagle_data.get('lens_rel_x', np.full_like(times_bjd, np.nan)), dtype=float),
-                'bagle_lens_rel_y_ER': np.asarray(bagle_data.get('lens_rel_y', np.full_like(times_bjd, np.nan)), dtype=float),
-                'thetaE_mas': float(bagle_params.get('thetaE', np.nan)),
-                't0_original_MJD': bagle_params.get('t0_original'),
-                't0_midpoint_MJD': bagle_params.get('t0_midpoint'),
-                't0_used_MJD': bagle_params.get('t0'),
-                'origin_reparam': bagle_params.get('__origin_reparam__', {}),
-                'geo_reparam': bagle_params.get('__geo_reparam__', {}),
-            }
-            diag_path = lc_file.parent / f"{lc_file.stem}_bagle_diagnostics.npz"
-            np.savez(diag_path, **diag)
-            if verbose:
-                print(f"    Wrote BAGLE diagnostics sidecar: {diag_path.name}")
-        except Exception as _diag_ex:
-            if verbose:
-                print(f"    Warning: failed to write BAGLE diagnostics sidecar: {_diag_ex}")
+        geo_receipt = bagle_params['__geo_reparam__'] if use_parallax else None
+        diag = {
+            'times_mjd': times_bjd.astype(float),
+            'gulls_true_N_mas': gulls_data['true_N_centroid_mas'],
+            'gulls_true_E_mas': gulls_data['true_E_centroid_mas'],
+            'gulls_true_x_ER': gulls_data['true_x_centroid'],
+            'gulls_true_y_ER': gulls_data['true_y_centroid'],
+            'gulls_source_x_ER': gulls_data['source_x'],
+            'gulls_source_y_ER': gulls_data['source_y'],
+            'gulls_sky_centroid_N_mas': gulls_data['sky_centroid_N_mas'],
+            'gulls_sky_centroid_E_mas': gulls_data['sky_centroid_E_mas'],
+            'gulls_lens_rel_x_ER': gulls_data['lens_rel_x'],
+            'gulls_lens_rel_y_ER': gulls_data['lens_rel_y'],
+            'bagle_shift_E_mas': np.asarray(bagle_data['shift_E'], dtype=float),
+            'bagle_shift_N_mas': np.asarray(bagle_data['shift_N'], dtype=float),
+            'bagle_sky_centroid_E_mas': np.asarray(bagle_data['sky_centroid_E_mas'], dtype=float),
+            'bagle_sky_centroid_N_mas': np.asarray(bagle_data['sky_centroid_N_mas'], dtype=float),
+            'bagle_lens_rel_x_ER': np.asarray(bagle_data['lens_rel_x'], dtype=float),
+            'bagle_lens_rel_y_ER': np.asarray(bagle_data['lens_rel_y'], dtype=float),
+            'thetaE_mas': float(bagle_params['thetaE']),
+            't0_original_MJD': bagle_params['t0_original'],
+            't0_midpoint_MJD': bagle_params['t0_midpoint'],
+            't0_used_MJD': bagle_params['t0'],
+            'origin_reparam': bagle_params['__origin_reparam__'],
+            'geo_reparam': geo_receipt,
+        }
+        diag_path = lc_file.parent / f"{lc_file.stem}_bagle_diagnostics.npz"
+        np.savez(diag_path, **diag)
+        if verbose:
+            print(f"    Wrote BAGLE diagnostics sidecar: {diag_path.name}")
         # Produce diagnostic plot before raising for post-mortem review.
         plot_file = lc_file.parent / f"{lc_file.stem}_bagle_FAIL.png"
         plot_validation(times_bjd, gulls_data, bagle_data, bagle_params, plot_file, lc_file.stem + " (FAIL)", bagle_model)

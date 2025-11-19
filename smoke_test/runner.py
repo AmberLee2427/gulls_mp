@@ -284,21 +284,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             validation_count = 0
             for out_file in case.output_dir.glob("*.out"):
-                # Find matching .lc files
                 base_name = out_file.stem  # e.g., "smoke_std_0_0"
-                # Pattern matches smoke_std_0_0_0.all.lc, smoke_std_0_0_1.all.lc, etc.
                 for lc_file in case.output_dir.glob(f"{base_name}_*.all.lc"):
-                    try:
-                        result = validate_event(
-                            out_file, lc_file, simulation_zero_time,
-                            multiple_sources, params_dict=case.params, verbose=True
-                        )
-                        if result:
-                            validation_count += 1
-                    except Exception as e:
-                        failures.append(f"{case.label} BAGLE validation failed for {lc_file.name}: {e}")
-                        # Continue to allow sidecar overlays to be plotted for diagnostics
-                        continue
+                    result = validate_event(
+                        out_file, lc_file, simulation_zero_time,
+                        multiple_sources, params_dict=case.params, verbose=True
+                    )
+                    if result:
+                        validation_count += 1
 
             if validation_count == 0:
                 print("  No events validated")
@@ -307,9 +300,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             # Re-render plots to include BAGLE overlays saved as sidecars during validation
             try:
-                # Ensure plotting knows overlays are expected if validation is enabled
-                if args.validate_bagle:
-                    case.params["VALIDATE_BAGLE"] = "1"
+                case.params["VALIDATE_BAGLE"] = "1"
                 plot_lightcurves(case.output_dir, summaries, case.params)
                 print("  Regenerated plots with BAGLE overlays (if sidecars present)")
             except Exception as _plot_ex:

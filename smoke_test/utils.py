@@ -7,16 +7,20 @@
 from __future__ import annotations
 
 import math
-import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
 np.seterr(all="raise")
 
 from .errors import SmokeTestError
-from .constants import REPO_ROOT
+from .rotations import (
+    rotation_xy_to_tu,
+    rotation_tu_to_xy,
+    rotation_xy_to_ne,
+    rotation_ne_to_xy,
+)
 
 from VBMicrolensing import VBMicrolensing as VBMicrolensingClass  # type: ignore[attr-defined]
 VBM_CLASS = VBMicrolensingClass  # type: ignore
@@ -48,10 +52,23 @@ def galactic_pm_to_icrs(l_deg: float, b_deg: float, mu_l: float, mu_b: float) ->
     )
 
 
-def _require_finite(value: float | None, label: str) -> float:
+def require_finite(value: float | None, label: str) -> float:
     if value is None or math.isnan(value):
         raise SmokeTestError(f"Required parameter '{label}' is missing or non-finite.")
     return float(value)
+
+
+def require_series(data: Dict[str, Any], key: str, label: str) -> np.ndarray:
+    """Return a finite 1-D numpy array for the requested column, fail-fast otherwise."""
+    if key not in data:
+        raise RuntimeError(f"Lightcurve missing required column '{key}' for {label}.")
+    arr = np.asarray(data[key], dtype=float)
+    if arr.ndim != 1 or arr.size == 0:
+        raise RuntimeError(f"Column '{key}' for {label} must be a non-empty 1-D array; got shape {arr.shape}.")
+    if not np.all(np.isfinite(arr)):
+        bad = np.where(~np.isfinite(arr))[0][:5]
+        raise RuntimeError(f"Column '{key}' for {label} contains non-finite entries at indices {bad}.")
+    return arr
 
 
 def _angle_diff_deg(a: float, b: float) -> float:
@@ -97,7 +114,7 @@ def validate_summary_vs_event(summary: Dict[str, float], event_vals: List[float]
     }
 
     def _check_close(name: str, s_val: float | None, h_val: float) -> None:
-        s = _require_finite(s_val, f"summary.{name}")
+        s = require_finite(s_val, f"summary.{name}")
         if not np.isfinite(h_val):
             raise SmokeTestError(f"#Event header {name} is non-finite")
         atol = field_atol.get(name, 1e-5)
@@ -113,7 +130,7 @@ def validate_summary_vs_event(summary: Dict[str, float], event_vals: List[float]
     _check_close("rho", rho_sum, rho_hdr)
 
     # Validate angle with wrap handling
-    alpha_val = _require_finite(alpha_sum, "summary.alpha_event")
+    alpha_val = require_finite(alpha_sum, "summary.alpha_event")
     if not np.isfinite(alpha_hdr):
         raise SmokeTestError("#Event header alpha_event is non-finite")
     d = abs(_angle_diff_deg(float(alpha_val), alpha_hdr))
@@ -151,13 +168,13 @@ def compute_vbm_model(
         raise SmokeTestError(f"Unphysical planet parameters (q={q_val}, s={s_val})")
 
     # Required from summary only (no fallback to event_vals)
-    rho_val = _require_finite(summary.get("rho"), "rho")
-    tE_val = _require_finite(summary.get("tE_ref"), "tE_ref")
-    u0_val = _require_finite(summary.get("u0"), "u0")
-    alpha_event_val = _require_finite(summary.get("alpha_event"), "alpha_event")
-    t0_val = _require_finite(summary.get("t0"), "t0")
-    pi_n_val = _require_finite(summary.get("pi_n"), "pi_n")
-    pi_e_val = _require_finite(summary.get("pi_e"), "pi_e")
+    rho_val = require_finite(summary.get("rho"), "rho")
+    tE_val = require_finite(summary.get("tE_ref"), "tE_ref")
+    u0_val = require_finite(summary.get("u0"), "u0")
+    alpha_event_val = require_finite(summary.get("alpha_event"), "alpha_event")
+    t0_val = require_finite(summary.get("t0"), "t0")
+    pi_n_val = require_finite(summary.get("pi_n"), "pi_n")
+    pi_e_val = require_finite(summary.get("pi_e"), "pi_e")
 
     if not (np.isfinite(theta_e_float) and theta_e_float > 0):
         raise SmokeTestError("theta_E must be positive and finite")
@@ -230,3 +247,5 @@ def compute_vbm_model(
         "sky_label": "VBM BinaryAstroLightCurve (sky)",
     }
     return model
+
+
