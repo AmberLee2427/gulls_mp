@@ -5,6 +5,6 @@ like read_gulls_lightcurve for reuse across validators.
 """
 
 from .runner import main
-from .lightcurve_io import read_gulls_lightcurve
+from .gulls_io import read_gulls_lightcurve
 
 __all__ = ["main", "read_gulls_lightcurve"]

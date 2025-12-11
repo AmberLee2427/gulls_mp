@@ -25,7 +25,7 @@ from astropy.coordinates import SkyCoord
 import astropy.units as u
 
 from .constants import REPO_ROOT
-from .lightcurve_io import read_gulls_lightcurve
+from .gulls_io import read_gulls_lightcurve
 from .errors import SmokeTestError
 from .utils import (
     derive_event_key,
@@ -35,15 +35,6 @@ from .utils import (
 
 # Enforce brittleness at import time too (in case this module is run outside the runner)
 np.seterr(all="raise")
-
-def _format_metric(value: float | None, precision: int = 3) -> str:
-    # Deprecated: Avoid tolerant display of physics; prefer strict extraction below.
-    if value is None or math.isnan(value):
-        raise SmokeTestError("Unexpected missing metric in _format_metric; use strict extractors instead.")
-    return f"{float(value):.{precision}f}"
-
-
-## Header parsing moved to shared helper read_gulls_lightcurve
 
 
 def _plot_photometry_only(
@@ -882,11 +873,6 @@ def plot_lightcurves(
         def _require_column(name: str) -> np.ndarray:
             if name not in column_names:
                 raise SmokeTestError(f"Smoke test failed: column '{name}' missing in {lc_file.name}")
-            return df[name].to_numpy(dtype=float, copy=False)
-
-        def _optional_column(name: str) -> np.ndarray | None:
-            if name not in column_names:
-                return None
             return df[name].to_numpy(dtype=float, copy=False)
 
         event_key = derive_event_key(lc_file)
