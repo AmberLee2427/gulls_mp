@@ -161,12 +161,13 @@ void photometry(struct filekeywords* Paramfile, struct event *Event, struct obsf
 		Event->ycerr[idx] = sigmaAstro;
 		Event->xc[idx] = Event->xctrue[idx] + sigmaAstro * gasdev(Paramfile->seed);
 		Event->yc[idx] = Event->yctrue[idx] + sigmaAstro * gasdev(Paramfile->seed);
+      }
 
-		//Test for saturation
-		Event->nosat[idx] = !satflag; //nosat is the opposite of satflag
-		if(Event->allsat && !satflag) Event->allsat = 0;
-		if(Event->allsatobs[obsidx] && !satflag) Event->allsatobs[obsidx] = 0;
-	
+      //Test for saturation
+      Event->nosat[idx] = !satflag; //nosat is the opposite of satflag
+      if(Event->allsat && !satflag) Event->allsat = 0;
+      if(Event->allsatobs[obsidx] && !satflag) Event->allsatobs[obsidx] = 0;
+  
     }
 
 }
