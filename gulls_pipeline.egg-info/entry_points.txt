@@ -1,0 +1,3 @@
+[console_scripts]
+gulls-runner = gulls_pipeline.cli:main
+gulls-ui = gulls_pipeline.server:main

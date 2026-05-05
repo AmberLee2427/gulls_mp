@@ -1,0 +1,8 @@
+Metadata-Version: 2.1
+Name: gulls_pipeline
+Version: 0.1.0
+Summary: Python wrapper and Web UI for the GULLS microlensing simulator
+Author: Malpas
+License-File: LICENSE
+Requires-Dist: fastapi
+Requires-Dist: uvicorn
