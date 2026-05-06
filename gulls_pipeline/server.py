@@ -9,6 +9,10 @@ import subprocess
 import tempfile
 import math
 from pathlib import Path
+from typing import Any
+
+from gulls_pipeline.presets import sources
+
 try:
     from astropy.time import Time
 except ImportError:
@@ -20,11 +24,92 @@ app = FastAPI()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "web")
 
+_PRESET_RECORDS: dict[str, sources.PresetRecord] = {}
+_PRESET_STATUSES: list[sources.SourceStatus] = []
+
+
+def _scan_presets(include_remote: bool = True) -> tuple[list[sources.PresetRecord], list[sources.SourceStatus]]:
+    records, statuses = sources.discover_all_presets(
+        start_path=Path(os.getcwd()),
+        include_remote=include_remote,
+    )
+    _PRESET_RECORDS.clear()
+    _PRESET_RECORDS.update({record.id: record for record in records})
+    _PRESET_STATUSES.clear()
+    _PRESET_STATUSES.extend(statuses)
+    return records, statuses
+
+
+def _ensure_presets_loaded() -> None:
+    if not _PRESET_RECORDS and not _PRESET_STATUSES:
+        _scan_presets()
+
+
+def _preset_summary(record: sources.PresetRecord) -> dict[str, Any]:
+    settings = record.parsed_settings
+    return {
+        "id": record.id,
+        "source_type": record.source_type,
+        "display_name": record.display_name,
+        "run_name": settings.get("RUN_NAME"),
+        "executable": settings.get("EXECUTABLE"),
+        "prm_path": str(record.prm_path),
+        "provenance": record.provenance,
+        "source_metadata": record.source_metadata,
+    }
+
 # Serve specific static files if needed, but primarily we just want index.html
 @app.get("/")
 @app.get("/app")
 def read_index():
-    return FileResponse(os.path.join(WEB_DIR, "index.html"))
+    return FileResponse(
+        os.path.join(WEB_DIR, "index.html"),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/preset-sources")
+def get_preset_sources(refresh: bool = False, include_remote: bool = True):
+    if refresh:
+        _scan_presets(include_remote=include_remote)
+    else:
+        _ensure_presets_loaded()
+    return {"sources": [status.as_dict() for status in _PRESET_STATUSES]}
+
+
+@app.post("/api/presets/refresh")
+def refresh_presets(include_remote: bool = True):
+    records, statuses = _scan_presets(include_remote=include_remote)
+    return {
+        "presets": [_preset_summary(record) for record in records],
+        "sources": [status.as_dict() for status in statuses],
+    }
+
+
+@app.get("/api/presets")
+def list_presets(refresh: bool = False, include_remote: bool = True):
+    loaded_include_remote = any(
+        status.source_type == "remote-cache" for status in _PRESET_STATUSES
+    )
+    if refresh or (include_remote and not loaded_include_remote):
+        records, statuses = _scan_presets(include_remote=include_remote)
+    else:
+        _ensure_presets_loaded()
+        records = list(_PRESET_RECORDS.values())
+        statuses = _PRESET_STATUSES
+    return {
+        "presets": [_preset_summary(record) for record in records],
+        "sources": [status.as_dict() for status in statuses],
+    }
+
+
+@app.get("/api/presets/{preset_id:path}")
+def get_preset(preset_id: str):
+    _ensure_presets_loaded()
+    record = _PRESET_RECORDS.get(preset_id)
+    if record is None:
+        return JSONResponse({"error": "Preset not found", "preset_id": preset_id}, status_code=404)
+    return {"preset": record.as_dict()}
 
 @app.post("/api/launch")
 async def launch_gulls(request: Request, background_tasks: BackgroundTasks):

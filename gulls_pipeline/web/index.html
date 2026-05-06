@@ -99,14 +99,25 @@
                         <h3 class="text-md font-semibold mb-4 border-b border-gray-700 pb-2">Survey & Time</h3>
                         <div class="grid grid-cols-2 gap-4">
                             <div class="col-span-2">
-                                <label class="block text-xs text-gray-400 mb-1">Observatory & Survey Preset</label>
-                                <select class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none">
-                                    <option>Smoke (Local Sandbox)</option>
-                                    <option>Roman-ROTAC</option>
-                                    <option>WFIRST-Cycle7</option>
-                                    <option>Euclid-Roman</option>
+                                <div class="flex items-center justify-between mb-1">
+                                    <label class="block text-xs text-gray-400">Parameter File Preset</label>
+                                    <button @click="fetchPresets(true)" type="button" class="text-xs text-blue-400 hover:text-blue-300">Refresh Presets</button>
+                                </div>
+                                <select v-model="ui_state.selected_preset_id" @change="loadSelectedPreset" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none">
+                                    <option disabled value="">{{ presetLoading ? 'Loading real presets...' : 'Select a preset' }}</option>
+                                    <option v-for="preset in presets" :key="preset.id" :value="preset.id">
+                                        [{{ preset.source_type }}] {{ preset.display_name }}{{ preset.executable ? ' - ' + preset.executable : '' }}
+                                    </option>
                                 </select>
-                                <p class="text-[10px] text-gray-500 mt-1">Automatically resolves observatory parameters, observing locations, rates, and limits.</p>
+                                <p class="text-[10px] text-gray-500 mt-1" v-if="selectedPreset">
+                                    Loaded from {{ selectedPreset.source_type }}: {{ selectedPreset.prm_path }}
+                                </p>
+                                <p class="text-[10px] text-red-400 mt-1" v-if="presetError">{{ presetError }}</p>
+                                <div class="mt-2 grid grid-cols-3 gap-2 text-[10px] text-gray-500" v-if="presetSources.length">
+                                    <span v-for="(source, idx) in presetSources" :key="idx" :class="source.status === 'unavailable' ? 'text-red-400' : (source.stale ? 'text-yellow-300' : 'text-gray-400')">
+                                        {{ source.source_type }}: {{ source.status }}{{ source.stale ? ' (stale)' : '' }}
+                                    </span>
+                                </div>
                             </div>
                             <div>
                                 <label class="block text-xs text-gray-400 mb-1">Sim Start Date (Gregorian)</label>
@@ -334,76 +345,65 @@
             mounted() {
                 // Fetch runs immediately so we have the list available for overwrite checks
                 this.fetchRuns();
+                this.fetchPresets(true);
                 this.updateGregorian(); // Seed the calendar from BJD
             },
             data() {
                 return {
                     activeTab: 'runner',
                     runs: [],
+                    presets: [],
+                    presetSources: [],
+                    selectedPreset: null,
+                    presetLoading: false,
+                    presetError: '',
                     selectedRun: null,
                     runLog: '',
                     logInterval: null,
                     ui_state: {
-                        gregorian_date: '2020-01-01'
+                        gregorian_date: '2020-01-01',
+                        selected_preset_id: ''
                     },
                     form: {
-                        run_name: "smoke_1s1l",
-                        output_dir: "smoke_test/output/ui/",
-                        executable: "gulls_general.x",
+                        preset_id: '',
+                        preset_source: '',
+                        run_name: "",
+                        output_dir: "",
+                        final_dir: "",
+                        executable: "",
                         registry_lookups: {
-                            catalogs: "smoke_test/assets/",
-                            starfields: "smoke.starfields",
-                            sources: "smoke.sources",
-                            lenses: "smoke.lenses",
-                            planet_root: "smoke_general_pspl.planets.",
-                            rates: "smoke_test/assets/rates/smoke.rates"
+                            catalogs: "",
+                            starfields: "",
+                            sources: "",
+                            lenses: "",
+                            planet_root: "",
+                            rates: ""
                         },
-                        observatory_dir: "smoke_test/assets/observatories/",
-                        observatory_list: "smoke.list",
+                        observatory_dir: "",
+                        observatory_list: "",
                         prm_settings: {
-                            NUM_SIM_DAYS: 200,
-                            SIMULATION_ZERO_TIME: 2458849.0,
-                            RANDOM_SEED: 12345,
-                            SET_RANDOM_SEED_TO_CLOCK: 0,
-                            ALLOW_RANDOM_STUB: 1,
-                            PRINCIPLE_OBSERVATORY: 0,
-                            ERROR_SCALING: 0,
-                            SUBRUNSIZE: 1,
-                            NSUBRUNS: 1,
-                            MAXTIME: 10.0,
-                            NFILTERS: 32,
-                            LARGEPSFMAG: 25.0,
-                            MIN_CHISQUARED: 0.0,
-                            LC_GEN: 1,
-                            LD_GAMMA: 0.1,
-                            REPEAT_SEQUENCE: 0,
-                            OBS_GROUPS: "(ALL)",
-                            OBS_GROUP_NAMES: "smoke",
-                            U0MAX: 1.0,
-                            AMIN: 1.0001,
-                            OUTPUT_LC: 1,
-                            OUTPUT_IMAGES: 1,
-                            PRETTY_PICS: 1,
-                            PRETTY_PICS_DIMENSIONS: 32,
+                            NUM_SIM_DAYS: null,
+                            SIMULATION_ZERO_TIME: null,
+                            SUBRUNSIZE: null,
+                            NSUBRUNS: null,
+                            MIN_CHISQUARED: null,
+                            U0MAX: null,
+                            AMIN: null,
+                            OUTPUT_LC: null,
+                            OUTPUT_IMAGES: 0,
+                            PRETTY_PICS: 0,
                             OUTPUT_ONERR: 0,
-                            OUTPUT_ONDET: 1,
-                            OUTPUT_ONALL: 1,
-                            VERBOSITY: 4,
-                            PARALLAX: 1,
-                            LENS_LIGHT: 1,
-                            ASTROMETRY_ON: 1,
-                            ASTROMETRIC_SYS_FLOOR: 0.0,
+                            OUTPUT_ONDET: 0,
+                            OUTPUT_ONALL: 0,
+                            VERBOSITY: null,
+                            PARALLAX: 0,
+                            LENS_LIGHT: 0,
+                            ASTROMETRY_ON: 0,
+                            ASTROMETRIC_SYS_FLOOR: null,
                             MULTIPLE_SOURCES: 0,
                             MULTIPLE_LENSES: 0,
-                            VBM_RELTOL: "1.0e-6",
-                            VBM_ABSTOL: "1.0e-4",
-                            LC_TIMEOUT: "10.0",
-                            VBM_TIMEOUT_ROOT_SOLVER: "10.0",
-                            VBM_TIMEOUT_MAGNIFICATION: "10.0",
-                            VBM_TIMEOUT_PARALLAX: "10.0",
-                            VBM_TIMEOUT_CRITICAL_CURVES: "10.0",
-                            VBM_TIMEOUT_ASTROMETRY: "10.0",
-                            VBM_TIMEOUT_CHECK_INTERVAL: 256,
+                            LC_TIMEOUT: "",
+                            VBM_TIMEOUT_ROOT_SOLVER: "",
                             EXIT_ON_VBM_ERROR: 0
                         }
                     }
@@ -417,6 +417,92 @@
                 }
             },
             methods: {
+                async fetchPresets(refresh = false) {
+                    this.presetLoading = true;
+                    this.presetError = '';
+                    try {
+                        const res = await fetch(`/api/presets${refresh ? '?refresh=true' : ''}`);
+                        const data = await res.json();
+                        if (!res.ok || data.error) throw new Error(data.error || 'Preset fetch failed');
+                        this.presets = data.presets || [];
+                        this.presetSources = data.sources || [];
+                        if (!this.ui_state.selected_preset_id && this.presets.length > 0) {
+                            this.ui_state.selected_preset_id = this.presets[0].id;
+                            await this.loadSelectedPreset();
+                        }
+                    } catch(e) {
+                        this.presetError = e.message || String(e);
+                    } finally {
+                        this.presetLoading = false;
+                    }
+                },
+                async loadSelectedPreset() {
+                    const presetId = this.ui_state.selected_preset_id;
+                    if (!presetId) return;
+                    this.presetError = '';
+                    try {
+                        const res = await fetch(`/api/presets/${encodeURIComponent(presetId)}`);
+                        const data = await res.json();
+                        if (!res.ok || data.error) throw new Error(data.error || 'Preset load failed');
+                        this.selectedPreset = data.preset;
+                        this.applyPresetToForm(data.preset);
+                    } catch(e) {
+                        this.presetError = e.message || String(e);
+                    }
+                },
+                applyPresetToForm(preset) {
+                    const settings = preset.parsed_settings || {};
+                    this.form.preset_id = preset.id;
+                    this.form.preset_source = preset.source_type;
+                    if (settings.RUN_NAME) this.form.run_name = settings.RUN_NAME;
+                    if (settings.EXECUTABLE) this.form.executable = settings.EXECUTABLE;
+                    if (settings.OUTPUT_DIR) this.form.output_dir = settings.OUTPUT_DIR;
+                    if (settings.FINAL_DIR) this.form.final_dir = settings.FINAL_DIR;
+                    if (settings.OBSERVATORY_DIR) this.form.observatory_dir = settings.OBSERVATORY_DIR;
+                    if (settings.OBSERVATORY_LIST) this.form.observatory_list = settings.OBSERVATORY_LIST;
+
+                    this.form.registry_lookups.catalogs = this.inferCatalogRoot(settings);
+                    if (settings.STARFIELD_LIST) this.form.registry_lookups.starfields = settings.STARFIELD_LIST;
+                    if (settings.SOURCE_LIST) this.form.registry_lookups.sources = settings.SOURCE_LIST;
+                    if (settings.LENS_LIST) this.form.registry_lookups.lenses = settings.LENS_LIST;
+                    if (settings.PLANET_ROOT) this.form.registry_lookups.planet_root = settings.PLANET_ROOT;
+                    if (settings.RATES_FILE) this.form.registry_lookups.rates = settings.RATES_FILE;
+
+                    const specialKeys = new Set([
+                        'RUN_NAME', 'EXECUTABLE', 'OUTPUT_DIR', 'FINAL_DIR',
+                        'OBSERVATORY_DIR', 'OBSERVATORY_LIST',
+                        'STARFIELD_DIR', 'STARFIELD_LIST',
+                        'SOURCE_DIR', 'SOURCE_LIST',
+                        'LENS_DIR', 'LENS_LIST',
+                        'PLANET_DIR', 'PLANET_ROOT',
+                        'RATES_FILE'
+                    ]);
+                    const nextSettings = {};
+                    for (const [key, value] of Object.entries(settings)) {
+                        if (!specialKeys.has(key)) nextSettings[key] = this.coercePresetValue(value);
+                    }
+                    this.form.prm_settings = Object.assign({}, this.form.prm_settings, nextSettings);
+                    if (settings.SIMULATION_ZERO_TIME) this.updateGregorian();
+                },
+                inferCatalogRoot(settings) {
+                    const dirs = [
+                        settings.STARFIELD_DIR,
+                        settings.SOURCE_DIR,
+                        settings.LENS_DIR,
+                        settings.PLANET_DIR
+                    ].filter(Boolean);
+                    if (!dirs.length) return this.form.registry_lookups.catalogs;
+                    const unique = [...new Set(dirs)];
+                    return unique.length === 1 ? unique[0] : unique.join(' | ');
+                },
+                coercePresetValue(value) {
+                    if (typeof value !== 'string') return value;
+                    const trimmed = value.trim();
+                    if (/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(trimmed)) {
+                        return Number(trimmed);
+                    }
+                    return value;
+                },
                 async updateBJD() {
                     const date_str = this.ui_state.gregorian_date;
                     try {
