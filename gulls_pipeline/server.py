@@ -7,7 +7,12 @@ import os
 import json
 import subprocess
 import tempfile
+import math
 from pathlib import Path
+try:
+    from astropy.time import Time
+except ImportError:
+    pass
 
 app = FastAPI()
 
@@ -79,6 +84,26 @@ def get_system_state():
         "cwd": cwd,
         "gulls_found": os.path.exists(bin_path)
     }
+
+@app.get("/api/time/to_gregorian")
+def get_gregorian(bjd: float):
+    try:
+        # BJD is JD corrected for barycenter tracking, but for daily start times JD is equivalent
+        t = Time(bjd, format='jd')
+        return {"gregorian": t.isot.split('T')[0]}  # YYYY-MM-DD
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/time/to_bjd")
+def get_bjd(gregorian: str):
+    try:
+        # Parse standard YYYY-MM-DD string
+        t = Time(gregorian)
+        # Round down to nearest whole day as requested
+        bjd = math.floor(t.jd) + 0.0
+        return {"bjd": bjd}
+    except Exception as e:
+        return {"error": str(e)}
 
 def main():
     parser = argparse.ArgumentParser(description="Launch the GULLS Configuration Web UI")

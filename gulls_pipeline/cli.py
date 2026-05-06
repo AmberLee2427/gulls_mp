@@ -11,31 +11,21 @@ def generate_files_and_run(config_path: str):
         
     run_name = config["run_name"]
     
-    # OUTPUT AND FINAL DIRECTORIES
-    out_dir = Path(config.get("output_dir", f"runs/{run_name}/output/"))
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # We define the primary run directory
+    base_dir = config.get("output_dir", "smoke_test/output/ui/")
+    run_dir = Path(base_dir) / run_name
+    
+    # GULLS internally appends run_name + "/" to the OUTPUT_DIR, so we
+    # must construct the parent `out_dir` but actually create the target 
+    # folder to prevent the "Unable to open output file" write crash.
+    out_dir = run_dir / "output"
+    actual_target = out_dir / run_name
+    actual_target.mkdir(parents=True, exist_ok=True)
     
     # Create the root parameter file
-    prm_path = out_dir.parent / f"{run_name}.prm"
-    obs_dir = out_dir.parent / "observatories"
-    obs_dir.mkdir(parents=True, exist_ok=True)
+    prm_path = run_dir / f"{run_name}.prm"
     
-    # 1. Write the observatories and their list
-    obs_list_path = obs_dir / "run.list"
-    obs_filenames = []
-    
-    for obs in config["observatories"]:
-        obs_filename = f"{obs['name']}.observatory"
-        obs_filenames.append(obs_filename)
-        with open(obs_dir / obs_filename, 'w') as f:
-            f.write(f"NAME {obs['name']}\n")
-            for k, v in obs["settings"].items():
-                f.write(f"{k} {v}\n")
-                
-    with open(obs_list_path, 'w') as f:
-        f.write("\n".join(obs_filenames) + "\n")
-        
-    # 2. Write the PRM file
+    # Write the PRM file
     with open(prm_path, 'w') as f:
         # Mandatory routing
         f.write(f"RUN_NAME={run_name}\n")
@@ -44,8 +34,11 @@ def generate_files_and_run(config_path: str):
         f.write(f"EXECUTABLE={config['executable']}\n")
         
         f.write(f"\n# OBSERVATORIES\n")
-        f.write(f"OBSERVATORY_DIR={obs_dir}/\n")
-        f.write(f"OBSERVATORY_LIST=run.list\n")
+        f.write(f"OBSERVATORY_DIR={config.get('observatory_dir', 'smoke_test/assets/observatories/')}\n")
+        f.write(f"OBSERVATORY_LIST={config.get('observatory_list', 'smoke.list')}\n")
+        
+        # Weather directory is needed by the new structure
+        f.write(f"\nWEATHER_PROFILE_DIR=smoke_test/assets/weather/\n")
         
         f.write(f"\n# REGISTRIES\n")
         reg = config.get("registry_lookups", {})
@@ -73,14 +66,19 @@ def generate_files_and_run(config_path: str):
         print(f"Error: {exec_path} not found. Please compile gulls.")
         sys.exit(1)
         
-    print(f"Running: {exec_path} -i {prm_path}")
+    print(f"Running: {exec_path} -i {prm_path} -s 0")
     
-    # Write stdout and stderr to a log file inside the parent wrapper directory
-    log_path = out_dir.parent / "gulls_run.log"
+    import os
+    env = os.environ.copy()
+    env["GULLS_BASE_DIR"] = str(Path.cwd()) + "/"
+    
+    # Write stdout and stderr to a log file inside the wrapper directory
+    log_path = run_dir / "gulls_run.log"
     with open(log_path, 'w') as log_file:
         proc = subprocess.Popen(
-            [str(exec_path), "-i", str(prm_path)],
+            [str(exec_path), "-i", str(prm_path), "-s", "0"],
             cwd=Path.cwd(),
+            env=env,
             stdout=log_file,
             stderr=subprocess.STDOUT
         )

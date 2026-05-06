@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GULLS Cloud Runner</title>
+    <title>Gulls Cloud Runner</title>
     <!-- Tailwind CSS for rapid styling -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -26,13 +26,13 @@
         <!-- Sidebar -->
         <aside class="w-64 bg-gray-800 border-r border-gray-700 flex flex-col">
             <div class="p-4 border-b border-gray-700">
-                <h1 class="text-xl font-bold text-blue-400">GULLS Cloud</h1>
+                <h1 class="text-xl font-bold text-blue-400">Gulls Cloud</h1>
             </div>
             <nav class="flex-1 p-2 space-y-1">
-                <button class="w-full text-left px-3 py-2 bg-blue-600 text-white rounded shadow-sm">Simulation Runner</button>
-                <button class="w-full text-left px-3 py-2 text-gray-400 hover:bg-gray-700 rounded transition">Catalog Factory</button>
-                <button class="w-full text-left px-3 py-2 text-gray-400 hover:bg-gray-700 rounded transition">Visualizer (Aladin)</button>
-                <button class="w-full text-left px-3 py-2 text-gray-400 hover:bg-gray-700 rounded transition">Run History</button>
+                <button @click="switchTab('runner')" :class="['w-full text-left px-3 py-2 rounded transition', activeTab === 'runner' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:bg-gray-700']">Simulation Runner</button>
+                <button class="w-full text-left px-3 py-2 text-gray-400 hover:bg-gray-700 rounded transition">Catalog Foundry</button>
+                <button class="w-full text-left px-3 py-2 text-gray-400 hover:bg-gray-700 rounded transition">Survey Design</button>
+                <button @click="switchTab('history')" :class="['w-full text-left px-3 py-2 rounded transition', activeTab === 'history' ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-400 hover:bg-gray-700']">Run History</button>
             </nav>
         </aside>
 
@@ -51,16 +51,16 @@
                 </div>
             </header>
 
-            <div class="flex-1 overflow-y-auto p-6 flex space-x-6">
+            <div v-show="activeTab === 'runner'" class="flex-1 overflow-y-auto p-6 flex space-x-6">
                 <!-- Form Area -->
                 <div class="flex-1 space-y-6 max-w-3xl">
                     
                     <!-- Global Settings -->
                     <section class="bg-gray-800 rounded-lg border border-gray-700 p-5 shadow-sm">
-                        <h3 class="text-md font-semibold mb-4 border-b border-gray-700 pb-2">Global Settings</h3>
+                        <h3 class="text-md font-semibold mb-4 border-b border-gray-700 pb-2">Global</h3>
                         <div class="grid grid-cols-2 gap-4">
                             <div>
-                                <label class="block text-xs text-gray-400 mb-1">Run Name</label>
+                                <label class="block text-xs text-gray-400 mb-1">Run Designation</label>
                                 <input v-model="form.run_name" type="text" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none">
                                 <p class="text-[10px] text-gray-500 mt-1">Unique identifier for this simulation output directory.</p>
                             </div>
@@ -74,9 +74,49 @@
                                 <p class="text-[10px] text-gray-500 mt-1">Which compiled simulator variant to run.</p>
                             </div>
                             <div>
+                                <label class="block text-xs text-gray-400 mb-1">Scheduler / Runner</label>
+                                <select class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none">
+                                    <option>Local (Subprocess)</option>
+                                    <option>SLURM Cluster</option>
+                                </select>
+                                <p class="text-[10px] text-gray-500 mt-1">Where to execute this run.</p>
+                            </div>
+                            <div class="flex gap-2">
+                                <div class="w-1/2">
+                                    <label class="block text-xs text-gray-400 mb-1">Num Subruns</label>
+                                    <input v-model.number="form.prm_settings.NSUBRUNS" type="number" placeholder="1" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
+                                </div>
+                                <div class="w-1/2">
+                                    <label class="block text-xs text-gray-400 mb-1">Subrun Size</label>
+                                    <input v-model.number="form.prm_settings.SUBRUNSIZE" type="number" placeholder="1" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Survey & Observatory Settings -->
+                    <section class="bg-gray-800 rounded-lg border border-gray-700 p-5 shadow-sm">
+                        <h3 class="text-md font-semibold mb-4 border-b border-gray-700 pb-2">Survey & Time</h3>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div class="col-span-2">
+                                <label class="block text-xs text-gray-400 mb-1">Observatory & Survey Preset</label>
+                                <select class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none">
+                                    <option>Smoke (Local Sandbox)</option>
+                                    <option>Roman-ROTAC</option>
+                                    <option>WFIRST-Cycle7</option>
+                                    <option>Euclid-Roman</option>
+                                </select>
+                                <p class="text-[10px] text-gray-500 mt-1">Automatically resolves observatory parameters, observing locations, rates, and limits.</p>
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Sim Start Date (Gregorian)</label>
+                                <input v-model="ui_state.gregorian_date" @change="updateBJD" type="date" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
+                                <p class="text-[10px] text-gray-500 mt-1">YYYY-MM-DD. Auto-converts to BJD.</p>
+                            </div>
+                            <div>
                                 <label class="block text-xs text-gray-400 mb-1">Sim Start (BJD)</label>
-                                <input v-model.number="form.prm_settings.SIMULATION_ZERO_TIME" type="number" step="0.1" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
-                                <p class="text-[10px] text-gray-500 mt-1">Start of Earth's orbital ephemeris. Usually maps to Jan 1 of observational year.</p>
+                                <input v-model.number="form.prm_settings.SIMULATION_ZERO_TIME" @change="updateGregorian" type="number" step="0.1" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
+                                <p class="text-[10px] text-gray-500 mt-1">Start of Earth's orbital ephemeris. Flushed to whole day.</p>
                             </div>
                             <div>
                                 <label class="block text-xs text-gray-400 mb-1">Duration (Days)</label>
@@ -94,131 +134,144 @@
                         </div>
                         <div class="grid grid-cols-2 gap-4">
                             <div>
-                                <label class="block text-xs text-gray-400 mb-1">Star Catalog Base</label>
-                                <select v-model="form.registry_lookups.catalogs" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none">
-                                    <option value="synthpop_roman_v2">Synthpop Roman Bulge v2.1</option>
-                                    <option value="besancon_2012">Besancon 2012 M31</option>
-                                </select>
-                                <p class="text-[10px] text-gray-500 mt-1">Pre-generated population (masses, distances, PMs).</p>
+                                <label class="block text-xs text-gray-400 mb-1">Catalog Directory Path</label>
+                                <input v-model="form.registry_lookups.catalogs" type="text" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm font-mono text-gray-400 focus:outline-none">
                             </div>
                             <div>
-                                <label class="block text-xs text-gray-400 mb-1">Rates File</label>
-                                <select v-model="form.registry_lookups.rates" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none">
-                                    <option value="standard_mw.rates">Standard Milky Way</option>
-                                </select>
-                                <p class="text-[10px] text-gray-500 mt-1">Underlying event rates per field.</p>
+                                <label class="block text-xs text-gray-400 mb-1">Rates File Path</label>
+                                <input v-model="form.registry_lookups.rates" type="text" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm font-mono text-gray-400 focus:outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Starfields List</label>
+                                <input v-model="form.registry_lookups.starfields" type="text" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm font-mono text-gray-400 focus:outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Sources List</label>
+                                <input v-model="form.registry_lookups.sources" type="text" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm font-mono text-gray-400 focus:outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Lenses List</label>
+                                <input v-model="form.registry_lookups.lenses" type="text" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm font-mono text-gray-400 focus:outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Planet Root Prefix</label>
+                                <input v-model="form.registry_lookups.planet_root" type="text" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm font-mono text-gray-400 focus:outline-none">
                             </div>
                         </div>
                     </section>
 
-                    <!-- Observatories -->
+                    <!-- Physics -->
                     <section class="bg-gray-800 rounded-lg border border-gray-700 p-5 shadow-sm">
                         <div class="flex justify-between items-center border-b border-gray-700 pb-2 mb-4">
-                            <h3 class="text-md font-semibold">Observatory Configurations</h3>
-                            <button @click="addObservatory" class="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-white border border-gray-600">+ Add Pass</button>
+                            <h3 class="text-md font-semibold">Physics</h3>
                         </div>
-                        
-                        <div v-for="(obs, index) in form.observatories" :key="index" class="mb-4 p-4 border border-gray-600 rounded bg-gray-700/50 space-y-3">
-                            <div class="flex justify-between items-center">
-                                <h4 class="text-sm font-medium text-blue-300">Observing Pass #{{ index + 1 }}</h4>
-                                <button @click="removeObservatory(index)" class="text-xs text-red-400 hover:text-red-300">Remove</button>
-                            </div>
-                            
-                            <div class="grid grid-cols-2 gap-3">
-                                <div>
-                                    <label class="block text-xs text-gray-400 mb-1">Name</label>
-                                    <input v-model="obs.name" type="text" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm">
-                                </div>
-                                <div>
-                                    <label class="block text-xs text-gray-400 mb-1">Preset Template</label>
-                                    <select @change="applyPreset(obs, $event.target.value)" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm">
-                                        <option value="">Custom</option>
-                                        <option value="roman_w146">Roman WFI W146</option>
-                                        <option value="roman_z087">Roman WFI Z087</option>
-                                        <option value="earth_i">Ground I-band</option>
-                                    </select>
-                                </div>
-                            </div>
+                        <div class="grid grid-cols-3 gap-4">
+                            <label class="flex items-center space-x-2 text-sm"><input type="checkbox" v-model="form.prm_settings.PARALLAX" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded"> <span>Parallax Active</span></label>
+                            <label class="flex items-center space-x-2 text-sm"><input type="checkbox" v-model="form.prm_settings.LENS_LIGHT" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded"> <span>Lens Light</span></label>
+                            <label class="flex items-center space-x-2 text-sm"><input type="checkbox" v-model="form.prm_settings.ASTROMETRY_ON" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded"> <span>Calculate Astrometry</span></label>
+                        </div>
+                        <div class="mt-4 pt-2 border-t border-gray-700">
+                            <label class="block text-xs text-gray-400 mb-1">Astrometric System Noise Floor (mas)</label>
+                            <input v-model.number="form.prm_settings.ASTROMETRIC_SYS_FLOOR" type="number" step="0.001" min="0" class="w-32 bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
+                            <p class="text-[10px] text-gray-500 mt-1">Minimum astrometric measurement noise level.</p>
+                        </div>
+                        <h5 class="text-sm font-medium text-blue-300 mb-2 mt-4 pt-2 border-t border-gray-700">Advanced Physics Toggles</h5>
+                        <div class="grid grid-cols-3 gap-2">
+                            <label class="flex items-center space-x-2 text-sm"><input type="checkbox" v-model="form.prm_settings.MULTIPLE_SOURCES" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded"> <span>Multiple Sources</span></label>
+                            <label class="flex items-center space-x-2 text-sm"><input type="checkbox" v-model="form.prm_settings.MULTIPLE_LENSES" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded"> <span>Multiple Lenses</span></label>
+                        </div>
+                    </section>
 
-                            <!-- Flexible File Selection for Sequences, Weather, etc. -->
-                            <div class="bg-gray-800 border border-gray-600 p-3 rounded grid grid-cols-1 gap-3">
+                    <!-- Fitting Constraints -->
+                    <section class="bg-gray-800 rounded-lg border border-gray-700 p-5 shadow-sm">
+                        <div class="flex justify-between items-center border-b border-gray-700 pb-2 mb-4">
+                            <h3 class="text-md font-semibold">Fitting Constraints</h3>
+                        </div>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Max Impact Parameter (U0MAX)</label>
+                                <input v-model.number="form.prm_settings.U0MAX" type="number" step="0.1" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Min Amplification (AMIN)</label>
+                                <input v-model.number="form.prm_settings.AMIN" type="number" step="0.1" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Min Fitting Delta-Chi2 (MIN_CHISQUARED)</label>
+                                <input v-model.number="form.prm_settings.MIN_CHISQUARED" type="number" step="0.01" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Max Fitting Evaluations (MAX_EVALUATIONS)</label>
+                                <input v-model.number="form.prm_settings.MAX_EVALUATIONS" type="number" step="100" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Outputs -->
+                    <section class="bg-gray-800 rounded-lg border border-gray-700 p-5 shadow-sm">
+                        <div class="flex justify-between items-center border-b border-gray-700 pb-2 mb-4">
+                            <h3 class="text-md font-semibold">Outputs</h3>
+                        </div>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Output Dir (OUTPUT_DIR)</label>
+                                <input v-model="form.output_dir" type="text" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none">
+                                <p class="text-[10px] text-gray-500 mt-1">Where to drop ongoing simulation data.</p>
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Final Dir (FINAL_DIR)</label>
+                                <input v-model="form.final_dir" type="text" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none">
+                                <p class="text-[10px] text-gray-500 mt-1">Where files are moved after SLURM finishes.</p>
+                            </div>
+                            <div class="space-y-3">
                                 <div>
-                                    <label class="block text-xs text-gray-400 mb-1">Sequence Strategy</label>
-                                    <div class="flex space-x-2">
-                                        <select v-model="obs.ui.seq_mode" class="bg-gray-700 border border-gray-600 rounded px-2 py-1 text-xs">
-                                            <option value="registry">From Registry</option>
-                                            <option value="upload">Upload Custom File</option>
-                                        </select>
-                                        <input v-if="obs.ui.seq_mode === 'registry'" v-model="obs.settings.OBSERVATION_SEQUENCE" type="text" class="flex-1 bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm font-mono text-gray-400" placeholder="e.g., bulge_W146.sequence">
-                                        <input v-if="obs.ui.seq_mode === 'upload'" type="file" class="flex-1 bg-gray-700 border border-gray-600 rounded px-2 py-0.5 text-xs text-gray-400">
-                                    </div>
-                                    <p class="text-[10px] text-gray-500 mt-1">Defines the timestamps to trigger observations.</p>
+                                    <label class="block text-xs text-gray-400 mb-1">Lightcurve Output Fraction (OUTPUT_LC)</label>
+                                    <input v-model.number="form.prm_settings.OUTPUT_LC" type="number" step="0.01" min="0" max="1" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
+                                    <p class="text-[10px] text-gray-500 mt-1">Probability an event lightcurve is output (1 = 100%).</p>
                                 </div>
-                                <div class="grid grid-cols-2 gap-3">
-                                    <div>
-                                        <label class="block text-xs text-gray-400 mb-1">Detector Specs</label>
-                                        <input v-model="obs.settings.DETECTOR" type="text" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-xs font-mono text-gray-400">
-                                    </div>
-                                    <div>
-                                        <label class="block text-xs text-gray-400 mb-1">Environment / Weather</label>
-                                        <input v-model="obs.settings.WEATHER_PROFILE" type="text" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-xs font-mono text-gray-400">
-                                    </div>
+                                <label class="flex items-center space-x-2 text-sm"><input type="checkbox" v-model="form.prm_settings.OUTPUT_IMAGES" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded text-blue-500 border-gray-600"> <span class="text-gray-300">Generate Image Data</span></label>
+                                <label class="flex items-center space-x-2 text-sm"><input type="checkbox" v-model="form.prm_settings.PRETTY_PICS" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded text-blue-500 border-gray-600"> <span class="text-gray-300">Generate Postage Stamp Images (PRETTY_PICS)</span></label>
+                                <div class="col-span-2">
+                                    <label class="block text-xs text-gray-400 mb-1">Postage Stamp Dimensions in Pixels (PRETTY_PICS_DIMENSIONS)</label>
+                                    <input v-model="form.prm_settings.PRETTY_PICS_DIMENSIONS" type="text" placeholder="32 or 256x256" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
+                                    <p class="text-[10px] text-gray-500 mt-1">Format: 32 or 32x32 or 32,32. Writes FITS detector images (e.g., _detector_stack.fits).</p>
+                                </div>
+                            </div>
+                            <div class="space-y-3">
+                                <div class="bg-gray-700/50 p-3 rounded border border-gray-600">
+                                    <h5 class="text-xs font-semibold text-gray-300 mb-2">Event Saving Conditions</h5>
+                                    <label class="flex items-center space-x-2 text-sm mb-2"><input type="checkbox" v-model="form.prm_settings.OUTPUT_ONDET" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded text-blue-500 border-gray-600"> <span class="text-gray-300">Save Detections (OUTPUT_ONDET)</span></label>
+                                    <label class="flex items-center space-x-2 text-sm mb-2"><input type="checkbox" v-model="form.prm_settings.OUTPUT_ONALL" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded text-blue-500 border-gray-600"> <span class="text-gray-300">Save All (OUTPUT_ONALL)</span></label>
                                 </div>
                             </div>
                         </div>
                     </section>
 
-                    <!-- Outputs & Logging Options -->
+                    <!-- Logging & Debugging -->
                     <section class="bg-gray-800 rounded-lg border border-gray-700 p-5 shadow-sm">
                         <details class="group">
                             <summary class="text-md font-semibold cursor-pointer list-none flex justify-between items-center text-gray-300 hover:text-white">
-                                <span>Output & Logging</span>
+                                <span>Logging & Debugging</span>
                                 <span class="text-xs transition group-open:rotate-180">▼</span>
                             </summary>
                             <div class="mt-4 pt-4 border-t border-gray-700 grid grid-cols-2 gap-4">
                                 <div class="space-y-3">
+                                    <h5 class="text-sm font-medium text-blue-300 mb-2">Console & Output</h5>
                                     <div>
-                                        <label class="block text-xs text-gray-400 mb-1">Lightcurve Output Fraction (OUTPUT_LC)</label>
-                                        <input v-model.number="form.prm_settings.OUTPUT_LC" type="number" step="0.01" min="0" max="1" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
-                                        <p class="text-[10px] text-gray-500 mt-1">Probability an event lightcurve is output (1 = 100%, 0.1 = 10%).</p>
-                                    </div>
-                                    <label class="flex items-center space-x-2 text-sm"><input type="checkbox" v-model="form.prm_settings.OUTPUT_IMAGES" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded text-blue-500"> <span>Generate Image Data</span></label>
-                                    <label class="flex items-center space-x-2 text-sm"><input type="checkbox" v-model="form.prm_settings.PRETTY_PICS" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded text-blue-500"> <span>Generate Visual Caustic Maps</span></label>
-                                </div>
-                                <div class="space-y-3">
-                                    <div class="bg-gray-700/50 p-3 rounded border border-gray-600">
-                                        <h5 class="text-xs font-semibold text-gray-300 mb-2">Event Saving Conditions</h5>
-                                        <label class="flex items-center space-x-2 text-sm mb-2"><input type="checkbox" v-model="form.prm_settings.OUTPUT_ONDET" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded text-blue-500"> <span>Save Detections (OUTPUT_ONDET)</span></label>
-                                        <label class="flex items-center space-x-2 text-sm mb-2"><input type="checkbox" v-model="form.prm_settings.OUTPUT_ONALL" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded text-blue-500"> <span>Save All Under Thresholds (OUTPUT_ONALL)</span></label>
-                                        <label class="flex items-center space-x-2 text-sm"><input type="checkbox" v-model="form.prm_settings.OUTPUT_ONERR" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded text-blue-500"> <span>Save Solver Errors (OUTPUT_ONERR)</span></label>
-                                    </div>
-                                    <div class="pt-2">
                                         <label class="block text-xs text-gray-400 mb-1">Console Verbosity (0-5)</label>
                                         <input v-model.number="form.prm_settings.VERBOSITY" type="number" min="0" max="5" class="w-16 bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
                                     </div>
+                                    <label class="flex items-center space-x-2 text-sm mt-3">
+                                        <input type="checkbox" v-model="form.prm_settings.OUTPUT_ONERR" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded text-red-400 border-gray-600"> 
+                                        <span class="text-gray-300">Save Solver Errors (OUTPUT_ONERR)</span>
+                                    </label>
+                                    <label class="flex items-center space-x-2 text-sm mt-3">
+                                        <input type="checkbox" v-model="form.prm_settings.ALLOW_RANDOM_STUB" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded border-gray-600"> 
+                                        <span class="text-gray-300">Allow Random Event Stubs (ALLOW_RANDOM_STUB)</span>
+                                    </label>
                                 </div>
-                            </div>
-                        </details>
-                    </section>
-
-                    <!-- Advanced Physics & Debugging Options -->
-                    <section class="bg-gray-800 rounded-lg border border-gray-700 p-5 shadow-sm">
-                        <details class="group">
-                            <summary class="text-md font-semibold cursor-pointer list-none flex justify-between items-center text-gray-300 hover:text-white">
-                                <span>Advanced Physics & Debugging</span>
-                                <span class="text-xs transition group-open:rotate-180">▼</span>
-                            </summary>
-                            <div class="mt-4 pt-4 border-t border-gray-700">
-                                <h5 class="text-sm font-medium text-blue-300 mb-2">Physics Toggles</h5>
-                                <div class="grid grid-cols-3 gap-2 mb-4">
-                                    <label class="flex items-center space-x-2 text-sm"><input type="checkbox" v-model="form.prm_settings.MULTIPLE_SOURCES" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded"> <span>Multiple Sources</span></label>
-                                    <label class="flex items-center space-x-2 text-sm"><input type="checkbox" v-model="form.prm_settings.MULTIPLE_LENSES" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded"> <span>Multiple Lenses</span></label>
-                                    <label class="flex items-center space-x-2 text-sm"><input type="checkbox" v-model="form.prm_settings.PARALLAX" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded"> <span>Parallax Active</span></label>
-                                    <label class="flex items-center space-x-2 text-sm"><input type="checkbox" v-model="form.prm_settings.LENS_LIGHT" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded"> <span>Lens Light</span></label>
-                                    <label class="flex items-center space-x-2 text-sm"><input type="checkbox" v-model="form.prm_settings.ASTROMETRY_ON" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded"> <span>Calculate Astrometry</span></label>
-                                </div>
-                                <h5 class="text-sm font-medium text-blue-300 mb-2 mt-4 pt-2 border-t border-gray-700">Solver (VBM) Debugging Limits</h5>
-                                <div class="grid grid-cols-2 gap-4">
+                                <div class="space-y-3">
+                                    <h5 class="text-sm font-medium text-blue-300 mb-2">Solver (VBM) Debugging Limits</h5>
                                     <div>
                                         <label class="block text-xs text-gray-400 mb-1">Max Event Calc Time (sec)</label>
                                         <input v-model="form.prm_settings.LC_TIMEOUT" type="text" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm font-mono focus:outline-none">
@@ -228,10 +281,10 @@
                                         <label class="block text-xs text-gray-400 mb-1">VBM Root Solver Timeout</label>
                                         <input v-model="form.prm_settings.VBM_TIMEOUT_ROOT_SOLVER" type="text" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm font-mono focus:outline-none">
                                     </div>
-                                    <div class="col-span-2">
-                                        <label class="flex items-center space-x-2 text-sm"><input type="checkbox" v-model="form.prm_settings.EXIT_ON_VBM_ERROR" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded text-red-500 bg-red-900 border-red-500"> <span class="text-red-300">Hard stop completely on VBM solver math errors</span></label>
-                                        <p class="text-[10px] text-gray-500 mt-1 ml-6">For development use. Usually best disabled (0) to skip bad events and continue.</p>
-                                    </div>
+                                </div>
+                                <div class="col-span-2 pt-2 border-t border-gray-700">
+                                    <label class="flex items-center space-x-2 text-sm"><input type="checkbox" v-model="form.prm_settings.EXIT_ON_VBM_ERROR" :true-value="1" :false-value="0" class="form-checkbox bg-gray-700 rounded text-red-500 bg-red-900 border-red-500"> <span class="text-red-300">Hard stop completely on VBM solver math errors</span></label>
+                                    <p class="text-[10px] text-gray-500 mt-1 ml-6">For development use. Usually best disabled (0) to skip bad events and continue.</p>
                                 </div>
                             </div>
                         </details>
@@ -247,6 +300,30 @@
                     <pre class="flex-1 p-4 overflow-y-auto text-xs text-blue-300 font-mono"><code v-text="prettyJson"></code></pre>
                 </div>
             </div>
+
+            <!-- Run History Tab -->
+            <div v-show="activeTab === 'history'" class="flex-1 overflow-y-auto p-6 flex space-x-6">
+                <!-- Run List -->
+                <div class="w-64 flex flex-col bg-gray-800 border border-gray-700 rounded-lg shadow-sm shrink-0">
+                    <div class="p-3 border-b border-gray-700 bg-gray-800 rounded-t-lg flex justify-between items-center">
+                        <h3 class="text-sm font-semibold text-gray-300">Runs</h3>
+                        <button @click="fetchRuns" class="text-xs text-blue-400 hover:text-blue-300">Refresh List</button>
+                    </div>
+                    <ul class="flex-1 overflow-y-auto p-2 space-y-1">
+                        <li v-for="run in runs" :key="run.name" @click="selectRun(run.name)" :class="['cursor-pointer p-2 rounded text-sm transition', selectedRun === run.name ? 'bg-blue-600 text-white' : 'text-gray-400 hover:bg-gray-700 bg-gray-900/50']">
+                            {{ run.name }}
+                        </li>
+                        <li v-if="runs.length === 0" class="p-2 text-xs text-gray-500 italic">No runs found...</li>
+                    </ul>
+                </div>
+                <!-- Log Reader -->
+                <div class="flex-1 flex flex-col bg-gray-950 border border-gray-700 rounded-lg shadow-sm font-mono text-xs">
+                    <div class="p-3 border-b border-gray-700 bg-gray-800 rounded-t-lg flex justify-between items-center">
+                        <h3 class="text-sm font-semibold text-gray-300">Terminal Log: {{ selectedRun || 'None Selected' }}</h3>
+                    </div>
+                    <pre class="flex-1 p-4 overflow-y-auto text-green-400 whitespace-pre-wrap break-words"><code>{{ runLog || 'Select a run to view its live log output.' }}</code></pre>
+                </div>
+            </div>
         </main>
     </div>
 
@@ -254,8 +331,21 @@
         const { createApp } = Vue
 
         createApp({
+            mounted() {
+                // Fetch runs immediately so we have the list available for overwrite checks
+                this.fetchRuns();
+                this.updateGregorian(); // Seed the calendar from BJD
+            },
             data() {
                 return {
+                    activeTab: 'runner',
+                    runs: [],
+                    selectedRun: null,
+                    runLog: '',
+                    logInterval: null,
+                    ui_state: {
+                        gregorian_date: '2020-01-01'
+                    },
                     form: {
                         run_name: "smoke_1s1l",
                         output_dir: "smoke_test/output/ui/",
@@ -268,6 +358,8 @@
                             planet_root: "smoke_general_pspl.planets.",
                             rates: "smoke_test/assets/rates/smoke.rates"
                         },
+                        observatory_dir: "smoke_test/assets/observatories/",
+                        observatory_list: "smoke.list",
                         prm_settings: {
                             NUM_SIM_DAYS: 200,
                             SIMULATION_ZERO_TIME: 2458849.0,
@@ -313,73 +405,80 @@
                             VBM_TIMEOUT_ASTROMETRY: "10.0",
                             VBM_TIMEOUT_CHECK_INTERVAL: 256,
                             EXIT_ON_VBM_ERROR: 0
-                        },
-                        observatories: [
-                            {
-                                name: "smoke",
-                                ui: { seq_mode: "registry" },
-                                settings: {
-                                    SPACE: 1,
-                                    ORBIT: 0,
-                                    FILTER: 6,
-                                    DETECTOR: "smoke_test/assets/observatories/smoke.detector",
-                                    THROUGHPUT: "smoke_test/assets/observatories/smoke.throughput",
-                                    OBSERVATION_SEQUENCE: "smoke_test/assets/observatories/smoke.sequence",
-                                    FIELDCENTRES: "smoke_test/assets/observatories/smoke.centres",
-                                    WEATHER_PROFILE: "smoke_test/assets/weather/smoke.weather"
-                                }
-                            }
-                        ]
+                        }
                     }
                 }
             },
             computed: {
                 prettyJson() {
-                    // Filter out UI-only state from the JSON payload sent to the backend
+                    // Prettify JSON payload without UI elements
                     const activeForm = JSON.parse(JSON.stringify(this.form));
-                    activeForm.observatories.forEach(obs => delete obs.ui);
                     return JSON.stringify(activeForm, null, 2);
                 }
             },
             methods: {
-                addObservatory() {
-                    this.form.observatories.push({
-                        name: "New Pass",
-                        ui: { seq_mode: "registry" },
-                        settings: {
-                            SPACE: 1,
-                            ORBIT: 0,
-                            FILTER: this.form.observatories.length + 1,
-                            DETECTOR: "default.detector",
-                            THROUGHPUT: "default.throughput",
-                            OBSERVATION_SEQUENCE: "default.sequence",
-                            FIELDCENTRES: "default.centres",
-                            WEATHER_PROFILE: "perfect.weather"
+                async updateBJD() {
+                    const date_str = this.ui_state.gregorian_date;
+                    try {
+                        const res = await fetch(`/api/time/to_bjd?gregorian=${date_str}`);
+                        const data = await res.json();
+                        if (data.bjd) {
+                            this.form.prm_settings.SIMULATION_ZERO_TIME = data.bjd;
                         }
-                    });
+                    } catch(e) { console.error('Time conversion failed:', e); }
                 },
-                removeObservatory(index) {
-                    this.form.observatories.splice(index, 1);
+                async updateGregorian() {
+                    const bjd = this.form.prm_settings.SIMULATION_ZERO_TIME;
+                    try {
+                        const res = await fetch(`/api/time/to_gregorian?bjd=${bjd}`);
+                        const data = await res.json();
+                        if (data.gregorian) {
+                            this.ui_state.gregorian_date = data.gregorian;
+                        }
+                    } catch(e) { console.error('Time conversion failed:', e); }
                 },
-                applyPreset(obs, preset) {
-                    if (preset === "roman_w146") {
-                        obs.name = "Roman_W146";
-                        obs.settings.DETECTOR = "roman_wfi_w146_v1.detector";
-                        obs.settings.THROUGHPUT = "roman_w146.throughput";
-                        obs.settings.SPACE = 1;
-                    } else if (preset === "roman_z087") {
-                        obs.name = "Roman_Z087";
-                        obs.settings.DETECTOR = "roman_wfi_z087_v1.detector";
-                        obs.settings.THROUGHPUT = "roman_z087.throughput";
-                        obs.settings.SPACE = 1;
-                    } else if (preset === "earth_i") {
-                        obs.name = "Ground_I";
-                        obs.settings.DETECTOR = "ccd_standard_i.detector";
-                        obs.settings.THROUGHPUT = "bessel_I.throughput";
-                        obs.settings.SPACE = 0;
+                switchTab(tab) {
+                    this.activeTab = tab;
+                    if (tab === 'history') {
+                        this.fetchRuns();
+                    } else {
+                        if (this.logInterval) clearInterval(this.logInterval);
+                        this.logInterval = null;
+                        this.selectedRun = null;
                     }
                 },
+                fetchRuns() {
+                    fetch('/api/runs')
+                        .then(r => r.json())
+                        .then(data => {
+                            if (data.runs) Object.assign(this, { runs: data.runs });
+                        })
+                        .catch(err => console.error("Error fetching runs:", err));
+                },
+                selectRun(runName) {
+                    this.selectedRun = runName;
+                    this.runLog = 'Fetching logs...';
+                    this.fetchLog();
+                    if (this.logInterval) clearInterval(this.logInterval);
+                    this.logInterval = setInterval(this.fetchLog, 2000);
+                },
+                fetchLog() {
+                    if (!this.selectedRun) return;
+                    fetch(`/api/runs/${this.selectedRun}/log?lines=200`)
+                        .then(r => r.json())
+                        .then(data => {
+                            if (data.log) this.runLog = data.log;
+                            else if (data.error) this.runLog = `Error: ${data.error}`;
+                        })
+                        .catch(err => console.error("Error fetching log:", err));
+                },
                 runSimulation() {
+                    const runExists = this.runs.find(r => r.name === this.form.run_name);
+                    if (runExists) {
+                        const overwrite = confirm("A run with this name already exists. Do you want to overwrite it?");
+                        if (!overwrite) return;
+                    }
+                    
                     fetch('/api/launch', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
