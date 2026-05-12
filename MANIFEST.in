@@ -1,1 +1,10 @@
 include gulls_pipeline/web/*
+recursive-include gulls_pipeline/bin *
+recursive-include gulls_pipeline/runtime/src *
+include smoke_test/README.md
+include smoke_test/smoke.yml
+recursive-include smoke_test/assets *
+include smoke_test/parameterfiles/*.prm
+prune smoke_test/output
+prune smoke_test/parameterfiles/__generated__
+prune smoke_test/__pycache__

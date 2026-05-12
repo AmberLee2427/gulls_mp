@@ -150,7 +150,10 @@ def test_smoke_provider_walks_upward_and_discovers_repo_parameterfiles(tmp_path)
 
 
 def test_smoke_provider_reports_unavailable_when_repo_not_found(tmp_path):
-    provider = sources.SmokeProvider(tmp_path / "not" / "a" / "repo")
+    provider = sources.SmokeProvider(
+        tmp_path / "not" / "a" / "repo",
+        include_packaged=False,
+    )
 
     assert provider.discover() == []
     assert provider.status.status == "unavailable"

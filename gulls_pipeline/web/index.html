@@ -46,7 +46,7 @@
                         Download JSON
                     </button>
                     <button @click="runSimulation" class="bg-green-600 hover:bg-green-500 text-white px-4 py-1.5 rounded font-medium transition shadow">
-                        Launch Run
+                        {{ launchButtonLabel }}
                     </button>
                 </div>
             </header>
@@ -69,15 +69,16 @@
                                 <select v-model="form.executable" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none">
                                     <option>gulls_general.x</option>
                                     <option>gulls_croin.x</option>
+                                    <option>gullsFish.x</option>
                                     <option>gulls_std.x</option>
                                 </select>
                                 <p class="text-[10px] text-gray-500 mt-1">Which compiled simulator variant to run.</p>
                             </div>
                             <div>
                                 <label class="block text-xs text-gray-400 mb-1">Scheduler / Runner</label>
-                                <select class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none">
-                                    <option>Local (Subprocess)</option>
-                                    <option>SLURM Cluster</option>
+                                <select v-model="form.scheduler" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:border-blue-500 focus:outline-none">
+                                    <option value="local">Local (Subprocess)</option>
+                                    <option value="slurm">SLURM Cluster</option>
                                 </select>
                                 <p class="text-[10px] text-gray-500 mt-1">Where to execute this run.</p>
                             </div>
@@ -90,6 +91,83 @@
                                     <label class="block text-xs text-gray-400 mb-1">Subrun Size</label>
                                     <input v-model.number="form.prm_settings.SUBRUNSIZE" type="number" placeholder="1" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
                                 </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- SLURM Settings -->
+                    <section v-if="isSlurm" class="bg-gray-800 rounded-lg border border-blue-800/70 p-5 shadow-sm">
+                        <div class="flex justify-between items-center border-b border-gray-700 pb-2 mb-4">
+                            <div>
+                                <h3 class="text-md font-semibold">SLURM Cluster Launch</h3>
+                                <p class="text-[10px] text-gray-500 mt-1">Generates an editable SLURM array bundle over subruns and field chunks.</p>
+                            </div>
+                            <div class="flex items-center gap-4">
+                                <label class="flex items-center space-x-2 text-sm">
+                                    <input type="checkbox" v-model="ui_state.remember_slurm_settings" class="form-checkbox bg-gray-700 rounded text-blue-500 border-gray-600">
+                                    <span class="text-gray-300">Remember my SLURM settings</span>
+                                </label>
+                                <button @click="resetSlurmSettings" type="button" class="text-xs text-gray-400 hover:text-red-300">Reset SLURM defaults</button>
+                                <label class="flex items-center space-x-2 text-sm">
+                                    <input type="checkbox" v-model="form.slurm.submit" class="form-checkbox bg-gray-700 rounded text-blue-500 border-gray-600">
+                                    <span class="text-gray-300">Submit immediately</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Partition / Queue</label>
+                                <input v-model="form.slurm.partition" type="text" placeholder="workq" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Account / Allocation</label>
+                                <input v-model="form.slurm.account" type="text" placeholder="hpc_roman03" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Walltime</label>
+                                <input v-model="form.slurm.walltime" type="text" placeholder="06:00:00" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm font-mono focus:outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Memory</label>
+                                <input v-model="form.slurm.memory" type="text" placeholder="8G" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm font-mono focus:outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">CPUs Per Task</label>
+                                <input v-model.number="form.slurm.cpus_per_task" type="number" min="1" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Max Concurrent Array Jobs</label>
+                                <input v-model.number="form.slurm.max_concurrent" type="number" min="1" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Fields</label>
+                                <input v-model="form.slurm.field_spec" type="text" placeholder="auto or 1,2,10-20" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm font-mono focus:outline-none">
+                                <p class="text-[10px] text-gray-500 mt-1">Use auto to read field ids from the selected SOURCE_LIST.</p>
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Fields Per Array Task</label>
+                                <input v-model.number="form.slurm.fields_per_task" type="number" min="1" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm focus:outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Gulls Base Dir on Cluster</label>
+                                <input v-model="form.slurm.gulls_base_dir" type="text" placeholder="/path/to/gulls_general" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm font-mono focus:outline-none">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-400 mb-1">Stars/Catalog Dir on Cluster</label>
+                                <input v-model="form.slurm.gulls_stars_dir" type="text" placeholder="leave blank to use GULLS_BASE_DIR" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm font-mono focus:outline-none">
+                            </div>
+                            <div class="col-span-2">
+                                <label class="block text-xs text-gray-400 mb-1">Executable Bin Dir</label>
+                                <input v-model="form.slurm.bin_dir" type="text" placeholder="${GULLS_BASE_DIR}/bin" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm font-mono focus:outline-none">
+                            </div>
+                            <div class="col-span-2">
+                                <label class="block text-xs text-gray-400 mb-1">Environment Prologue</label>
+                                <textarea v-model="form.slurm.prologue" rows="4" placeholder="module load gcc&#10;conda activate gulls" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm font-mono focus:outline-none"></textarea>
+                                <p class="text-[10px] text-gray-500 mt-1">Cluster-specific shell setup injected into slurm/env.sh.</p>
+                            </div>
+                            <div class="col-span-2">
+                                <label class="block text-xs text-gray-400 mb-1">Extra #SBATCH Lines</label>
+                                <textarea v-model="form.slurm.extra_sbatch" rows="3" placeholder="#SBATCH --constraint=rome" class="w-full bg-gray-700 border border-gray-600 rounded px-2 py-1 text-sm font-mono focus:outline-none"></textarea>
                             </div>
                         </div>
                     </section>
@@ -340,10 +418,31 @@
 
     <script>
         const { createApp } = Vue
+        const SLURM_CACHE_KEY = 'gulls-ui.slurm-settings.v1';
+
+        function defaultSlurmSettings() {
+            return {
+                partition: "",
+                account: "",
+                walltime: "06:00:00",
+                memory: "",
+                cpus_per_task: 1,
+                max_concurrent: 20,
+                fields_per_task: 1,
+                field_spec: "auto",
+                gulls_base_dir: "",
+                gulls_stars_dir: "",
+                bin_dir: "",
+                prologue: "",
+                extra_sbatch: "",
+                submit: false
+            };
+        }
 
         createApp({
             mounted() {
                 // Fetch runs immediately so we have the list available for overwrite checks
+                this.loadSlurmSettingsCache();
                 this.fetchRuns();
                 this.fetchPresets(true);
                 this.updateGregorian(); // Seed the calendar from BJD
@@ -362,15 +461,18 @@
                     logInterval: null,
                     ui_state: {
                         gregorian_date: '2020-01-01',
-                        selected_preset_id: ''
+                        selected_preset_id: '',
+                        remember_slurm_settings: false
                     },
                     form: {
                         preset_id: '',
                         preset_source: '',
+                        scheduler: 'local',
                         run_name: "",
                         output_dir: "",
                         final_dir: "",
                         executable: "",
+                        slurm: defaultSlurmSettings(),
                         registry_lookups: {
                             catalogs: "",
                             starfields: "",
@@ -410,9 +512,17 @@
                 }
             },
             computed: {
+                isSlurm() {
+                    return this.form.scheduler === 'slurm';
+                },
+                launchButtonLabel() {
+                    if (!this.isSlurm) return 'Launch Run';
+                    return this.form.slurm.submit ? 'Submit SLURM Job' : 'Generate SLURM Bundle';
+                },
                 prettyJson() {
                     // Prettify JSON payload without UI elements
                     const activeForm = JSON.parse(JSON.stringify(this.form));
+                    if (activeForm.scheduler !== 'slurm') delete activeForm.slurm;
                     return JSON.stringify(activeForm, null, 2);
                 }
             },
@@ -558,7 +668,35 @@
                         })
                         .catch(err => console.error("Error fetching log:", err));
                 },
+                loadSlurmSettingsCache() {
+                    try {
+                        const raw = localStorage.getItem(SLURM_CACHE_KEY);
+                        if (!raw) return;
+                        const cached = JSON.parse(raw);
+                        if (!cached || typeof cached !== 'object') return;
+                        this.form.slurm = Object.assign(defaultSlurmSettings(), cached.settings || {});
+                        this.form.slurm.submit = false;
+                        this.ui_state.remember_slurm_settings = true;
+                    } catch(e) {
+                        console.warn('Ignoring invalid SLURM settings cache:', e);
+                    }
+                },
+                saveSlurmSettingsCache() {
+                    if (!this.ui_state.remember_slurm_settings) return;
+                    const settings = Object.assign({}, this.form.slurm, { submit: false });
+                    localStorage.setItem(SLURM_CACHE_KEY, JSON.stringify({
+                        version: 1,
+                        saved_at: new Date().toISOString(),
+                        settings
+                    }));
+                },
+                resetSlurmSettings() {
+                    localStorage.removeItem(SLURM_CACHE_KEY);
+                    this.form.slurm = defaultSlurmSettings();
+                    this.ui_state.remember_slurm_settings = false;
+                },
                 runSimulation() {
+                    this.saveSlurmSettingsCache();
                     const runExists = this.runs.find(r => r.name === this.form.run_name);
                     if (runExists) {
                         const overwrite = confirm("A run with this name already exists. Do you want to overwrite it?");
@@ -571,10 +709,15 @@
                         body: this.prettyJson
                     })
                     .then(r => r.json())
-                    .then(data => alert('Run requested! Python CLI responded. PID: ' + (data.pid || 'unknown')))
-                    .catch(err => alert('Failed to contact Python backend. Start gulls-ui manually.'));
+                    .then(data => {
+                        if (data.error) throw new Error(data.error);
+                        alert(data.message || 'Run requested.');
+                        this.fetchRuns();
+                    })
+                    .catch(err => alert('Launch failed: ' + (err.message || err)));
                 },
                 downloadJson() {
+                    this.saveSlurmSettingsCache();
                     const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(this.prettyJson);
                     const dl = document.createElement('a');
                     dl.setAttribute("href", dataStr);

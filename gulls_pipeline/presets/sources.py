@@ -164,12 +164,21 @@ class SmokeProvider:
 
     source_type = "smoke"
 
-    def __init__(self, start_path: str | os.PathLike[str] | None = None) -> None:
+    def __init__(
+        self,
+        start_path: str | os.PathLike[str] | None = None,
+        *,
+        include_packaged: bool = True,
+    ) -> None:
         self.start_path = Path(start_path).expanduser() if start_path else Path.cwd()
+        self.include_packaged = include_packaged
         self.status = SourceStatus(source_type=self.source_type, status="not-run")
 
     def discover(self) -> list[PresetRecord]:
-        repo_root = find_smoke_repo_root(self.start_path)
+        repo_root = find_smoke_repo_root(
+            self.start_path,
+            include_packaged=self.include_packaged,
+        )
         if repo_root is None:
             self.status = SourceStatus(
                 source_type=self.source_type,
@@ -311,7 +320,11 @@ class LocalDirectoryProvider:
         return records
 
 
-def find_smoke_repo_root(start_path: str | os.PathLike[str]) -> Path | None:
+def find_smoke_repo_root(
+    start_path: str | os.PathLike[str],
+    *,
+    include_packaged: bool = True,
+) -> Path | None:
     """Walk upward from ``start_path`` until smoke parameter files are found."""
 
     start = Path(start_path).expanduser()
@@ -319,6 +332,14 @@ def find_smoke_repo_root(start_path: str | os.PathLike[str]) -> Path | None:
     for candidate in (current, *current.parents):
         if (candidate / "smoke_test" / "parameterfiles").is_dir():
             return candidate
+    if include_packaged:
+        try:
+            import smoke_test
+        except ModuleNotFoundError:
+            return None
+        package_root = Path(smoke_test.__file__).resolve().parents[1]
+        if (package_root / "smoke_test" / "parameterfiles").is_dir():
+            return package_root
     return None
 
 

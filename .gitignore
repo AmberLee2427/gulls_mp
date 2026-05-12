@@ -58,6 +58,12 @@ docs/build/
 __pycache__/
 *.pyc
 *.pyo
+dist/
+*.egg-info/
+gulls_pipeline/bin/*
+!gulls_pipeline/bin/__init__.py
+gulls_pipeline/runtime/src/*
+!gulls_pipeline/runtime/src/.gitkeep
 
 # IDE files
 .vscode/

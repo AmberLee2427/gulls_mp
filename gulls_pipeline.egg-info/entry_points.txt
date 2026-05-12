@@ -1,3 +1,4 @@
 [console_scripts]
 gulls-runner = gulls_pipeline.cli:main
+gulls-smoke-test = smoke_test.runner:main
 gulls-ui = gulls_pipeline.server:main

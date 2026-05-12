@@ -11,6 +11,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from gulls_pipeline import launcher
 from gulls_pipeline.presets import sources
 
 try:
@@ -114,6 +115,14 @@ def get_preset(preset_id: str):
 @app.post("/api/launch")
 async def launch_gulls(request: Request, background_tasks: BackgroundTasks):
     config = await request.json()
+    scheduler = str(config.get("scheduler") or "local").lower()
+
+    if scheduler == "slurm":
+        try:
+            result = launcher.generate_slurm_bundle(config, cwd=Path(os.getcwd()))
+            return JSONResponse(result.as_dict())
+        except Exception as exc:
+            return JSONResponse({"status": "error", "error": str(exc)}, status_code=400)
     
     # Store the JSON payload in a temporary file to hand off to runner
     fd, temp_path = tempfile.mkstemp(suffix=".json", prefix="gulls_ui_")

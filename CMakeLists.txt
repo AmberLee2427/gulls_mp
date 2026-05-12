@@ -217,6 +217,15 @@ add_gulls_executable(gullsFish.x
   "${CLASSES_DIR}/fisherinversion.cpp"
 )
 
+install(
+  TARGETS
+    gulls_std.x
+    gulls_general.x
+    gulls_croin.x
+    gullsFish.x
+  RUNTIME DESTINATION bin
+)
+
 
 
 # PSF generation utility (standalone, minimal dependencies)
@@ -272,4 +281,13 @@ target_include_directories(generateMoffatPSF
 target_link_libraries(generateMoffatPSF
   PRIVATE
     gulls_core
+)
+
+install(
+  TARGETS
+    generateMoffat
+    txt2fits
+    precompute_psf
+    generateMoffatPSF
+  RUNTIME DESTINATION bin
 )
